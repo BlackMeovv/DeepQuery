@@ -52,8 +52,11 @@ def run_eval(
     label: str | None = None,
     db_root: str | Path | None = None,
     sleep_seconds: float = 0.0,
+    db_path: str | Path | None = None,
 ) -> dict:
     settings = get_settings()
+    if db_path:  # 覆盖 DB_PATH：业务口径文件随之切换到该数据集自己的那一份
+        settings = settings.model_copy(update={"db_path": str(db_path)})
     from ..tools.engines import is_server_dsn
 
     if is_server_dsn(settings.db_path):
@@ -274,6 +277,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=1, help="重复次数（汇总为 Wilson 置信区间）")
     parser.add_argument("--label", default=None, help="本次配置名（消融表行名）")
     parser.add_argument("--db-root", default=None, help="case 内相对 db 路径的根目录")
+    parser.add_argument("--db", default=None, help="评测用的库（覆盖 DB_PATH），如 data/olist/olist.sqlite")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument(
@@ -289,6 +293,7 @@ def main() -> None:
         label=args.label,
         db_root=args.db_root,
         sleep_seconds=args.sleep,
+        db_path=args.db,
     )
     if args.gold_replay and report["summary"]["ex_accuracy"] < 1.0:
         raise SystemExit("gold-replay 未达 100%：评测基建存在 bug，请先修复")

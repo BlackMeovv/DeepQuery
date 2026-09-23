@@ -239,3 +239,48 @@ class TestServer:
         env = self._healthz(own, tmp_path, dataset_note="公司销售库")
         assert env["dataset_note"] == "公司销售库"
         assert env["samples"] == [] and env["dataset_source"] == ""
+
+
+class TestEvalSet:
+    """Olist 评测集：gold 与导入后的 schema 一致、切分无泄漏、并列检测有效。"""
+
+    @staticmethod
+    def _cases(name):
+        from deepquery.evalkit.runner import load_cases
+
+        return load_cases(f"eval/cases/{name}.jsonl")
+
+    def test_every_template_runs_on_imported_schema(self, olist_db):
+        from deepquery.evalkit.olist_set import _templates
+
+        conn = sqlite3.connect(olist_db)
+        for question, sql, _tags in _templates():
+            conn.execute(sql).fetchall()  # 列名/表名写错会在这里抛错
+
+    def test_committed_cases_are_disjoint_and_clean(self, olist_db):
+        dev, holdout = self._cases("olist-dev"), self._cases("olist-holdout")
+        ids = [c["id"] for c in dev + holdout]
+        assert len(ids) == len(set(ids)) and len(dev) > len(holdout) > 0
+        assert not {c["question"] for c in dev} & {c["question"] for c in holdout}
+        lines = Path("eval/knowledge/olist/examples.jsonl").read_text(encoding="utf-8").splitlines()
+        examples = {json.loads(x)["question"] for x in lines if x.strip() and not x.startswith("#")}
+        assert not examples & {c["question"] for c in dev + holdout}  # 例句不能出现在评测集里
+        conn = sqlite3.connect(olist_db)
+        for case in dev + holdout:
+            conn.execute(case["gold_sql"]).fetchall()
+
+    def test_tie_at_cut_is_detected(self, olist_db):
+        from deepquery.evalkit.olist_set import _ties_at_cut
+
+        conn = sqlite3.connect(olist_db)
+        # 27 个州里多个州同属"北部"：按大区排序取第一个必然并列
+        assert _ties_at_cut(conn, "SELECT code FROM states ORDER BY region_zh LIMIT 1")
+        assert not _ties_at_cut(conn, "SELECT code FROM states ORDER BY code LIMIT 1")
+        # 排序键是别名：各大区州数 9、7、4、4、3，取前 3 名恰好切在两个 4 之间
+        by_region = "SELECT region_zh, COUNT(*) AS n FROM states GROUP BY region_zh ORDER BY n DESC LIMIT {}"
+        assert _ties_at_cut(conn, by_region.format(3))
+        assert not _ties_at_cut(conn, by_region.format(2))
+        # 排序键是不在输出列里的聚合：按行数 sao paulo 领先，按去重客户数两城并列
+        city = "SELECT city FROM customers GROUP BY city ORDER BY {} DESC LIMIT 1"
+        assert not _ties_at_cut(conn, city.format("COUNT(*)"))
+        assert _ties_at_cut(conn, city.format("COUNT(DISTINCT unique_id)"))

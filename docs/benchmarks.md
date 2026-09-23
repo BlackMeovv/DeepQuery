@@ -58,3 +58,23 @@ make report FILES="eval/results/<基线>.json eval/results/<改动后>.json"
 
 - 调 prompt / 检索只看 dev 子集；最终对外报告的数字用另抽的 held-out 子集复核（换个 seed 再 prepare 一份，标记为 holdout，平时绝不跑）。
 - 报告 JSON 全部留档在 `eval/results/` 并纳入版本库：README 与复盘里的每个数字都能从这里复算。
+
+# 真实数据评测集：Olist
+
+自建业务集跑在程序生成的演示库上，数据干净、分布均匀。Olist 评测集用的是真实订单数据
+（约 10 万订单，有缺失值、订单级客户 ID、没有品类的商品等真实数据的毛病），考察同一套 Agent 在真实库上的表现。
+
+- 138 条中文问题：按州 / 品类 / 月份 / 支付方式 / 评分的参数化模板，加上 41 条手写的多表关联和口径类问题
+- 口径与 `eval/knowledge/olist/glossary.jsonl` 一致：销售额排除已取消订单、客户数按 `unique_id` 去重、延迟送达按承诺日期判断
+- 每条 gold 都在真实库上执行校验；TOP-N 题在截断处并列的会被剔除（并列时取哪个都对，无法唯一判分）
+- 固定 seed 切成 dev 96 条 / holdout 42 条，holdout 只用于最终复核
+- 生成器：`src/deepquery/evalkit/olist_set.py`；题目：`eval/cases/olist-{dev,holdout}.jsonl`
+
+```bash
+make olist-db
+make olist-gold
+make olist-eval LABEL=baseline
+```
+
+依次是：下载导入数据、离线自检（gold 回放必须 100%，不需要 API Key）、用真实模型跑 3 次。
+评测时通过 `--db data/olist/olist.sqlite` 指定库，业务口径会自动换成 Olist 的那一份。

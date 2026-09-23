@@ -1,0 +1,45 @@
+# Olist 真实数据评测集 olist-holdout：42 条（seed=42，70/30 切分，gold 逐条执行校验）
+# 库：data/olist/olist.sqlite（make olist-db）；口径：eval/knowledge/olist/glossary.jsonl
+# ⚠️ holdout 只用于最终复核，调 prompt/检索期间绝不允许跑
+{"id": "olist-0097", "question": "米纳斯吉拉斯州的客户贡献了多少销售额？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN customers c ON c.id = o.customer_id WHERE c.state = 'MG' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "money", "jargon"]}
+{"id": "olist-0098", "question": "因为缺货被取消的订单有多少笔？", "gold_sql": "SELECT COUNT(*) FROM orders WHERE status = 'unavailable'", "tags": ["filter"]}
+{"id": "olist-0099", "question": "东南部大区有多少位客户？", "gold_sql": "SELECT COUNT(DISTINCT c.unique_id) FROM customers c JOIN states s ON s.code = c.state WHERE s.region_zh = '东南部'", "tags": ["join", "jargon"]}
+{"id": "olist-0100", "question": "好评占全部评价的百分之多少？", "gold_sql": "SELECT 100.0 * SUM(score >= 4) / COUNT(*) FROM reviews", "tags": ["jargon"]}
+{"id": "olist-0101", "question": "寄往南里奥格兰德州的订单平均送达天数是多少？", "gold_sql": "SELECT AVG(julianday(o.delivered_at) - julianday(o.purchased_at)) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.state = 'RS' AND o.delivered_at IS NOT NULL", "tags": ["join", "date", "jargon"]}
+{"id": "olist-0102", "question": "2018 年 1 月到 3 月的销售额是多少？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.purchased_at >= '2018-01-01' AND o.purchased_at < '2018-04-01' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "date", "money", "jargon"]}
+{"id": "olist-0103", "question": "床品卫浴商品的平均重量是多少克？", "gold_sql": "SELECT AVG(p.weight_g) FROM products p WHERE p.category = 'cama_mesa_banho'", "tags": ["filter"]}
+{"id": "olist-0104", "question": "有多少位客户下单买过电脑配件商品？", "gold_sql": "SELECT COUNT(DISTINCT c.unique_id) FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id JOIN products p ON p.id = oi.product_id WHERE p.category = 'informatica_acessorios'", "tags": ["join", "jargon"]}
+{"id": "olist-0105", "question": "分期超过 6 期的信用卡支付有多少笔？", "gold_sql": "SELECT COUNT(*) FROM payments WHERE type = 'credit_card' AND installments > 6", "tags": ["filter"]}
+{"id": "olist-0106", "question": "巴拉那州有多少位客户？", "gold_sql": "SELECT COUNT(DISTINCT c.unique_id) FROM customers c WHERE c.state = 'PR'", "tags": ["filter", "jargon"]}
+{"id": "olist-0107", "question": "2017 年 11 月 24 日（黑色星期五）当天有多少笔订单？", "gold_sql": "SELECT COUNT(*) FROM orders WHERE date(purchased_at) = '2017-11-24'", "tags": ["date"]}
+{"id": "olist-0108", "question": "平台一共有多少位客户？", "gold_sql": "SELECT COUNT(DISTINCT unique_id) FROM customers", "tags": ["jargon"]}
+{"id": "olist-0109", "question": "圣保罗州有多少位客户？", "gold_sql": "SELECT COUNT(DISTINCT c.unique_id) FROM customers c WHERE c.state = 'SP'", "tags": ["filter", "jargon"]}
+{"id": "olist-0110", "question": "状态是已发货的订单有多少笔？", "gold_sql": "SELECT COUNT(*) FROM orders WHERE status = 'shipped'", "tags": ["filter"]}
+{"id": "olist-0111", "question": "客户最多的城市是哪个？", "gold_sql": "SELECT city FROM customers GROUP BY city ORDER BY COUNT(DISTINCT unique_id) DESC LIMIT 1", "tags": ["sort", "jargon"]}
+{"id": "olist-0112", "question": "2018 年 1 月有多少笔订单？", "gold_sql": "SELECT COUNT(*) FROM orders o WHERE strftime('%Y-%m', o.purchased_at) = '2018-01'", "tags": ["date"]}
+{"id": "olist-0113", "question": "销售额最高的卖家 id 是什么？", "gold_sql": "SELECT oi.seller_id FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.status NOT IN ('canceled', 'unavailable') GROUP BY oi.seller_id ORDER BY SUM(oi.price) DESC LIMIT 1", "tags": ["join", "sort", "money", "jargon"]}
+{"id": "olist-0114", "question": "列出 2018 年 1 月到 6 月每个月的订单数（月份写成 2018-01 这样）", "gold_sql": "SELECT strftime('%Y-%m', purchased_at) AS month, COUNT(*) AS n FROM orders WHERE purchased_at >= '2018-01-01' AND purchased_at < '2018-07-01' GROUP BY month ORDER BY month", "tags": ["date", "sort"]}
+{"id": "olist-0115", "question": "电脑配件商品的平均重量是多少克？", "gold_sql": "SELECT AVG(p.weight_g) FROM products p WHERE p.category = 'informatica_acessorios'", "tags": ["filter"]}
+{"id": "olist-0116", "question": "2017 年 11 月有多少笔订单？", "gold_sql": "SELECT COUNT(*) FROM orders o WHERE strftime('%Y-%m', o.purchased_at) = '2017-11'", "tags": ["date"]}
+{"id": "olist-0117", "question": "代金券支付一共有多少笔？", "gold_sql": "SELECT COUNT(*) FROM payments p WHERE p.type = 'voucher'", "tags": ["filter"]}
+{"id": "olist-0118", "question": "2018 年 7 月下单的订单里，有多少笔延迟送达？", "gold_sql": "SELECT COUNT(*) FROM orders o WHERE strftime('%Y-%m', o.purchased_at) = '2018-07' AND o.delivered_at IS NOT NULL AND date(o.delivered_at) > date(o.estimated_delivery_at)", "tags": ["date", "jargon"]}
+{"id": "olist-0119", "question": "借记卡支付一共有多少笔？", "gold_sql": "SELECT COUNT(*) FROM payments p WHERE p.type = 'debit_card'", "tags": ["filter"]}
+{"id": "olist-0120", "question": "巴伊亚州有多少位客户？", "gold_sql": "SELECT COUNT(DISTINCT c.unique_id) FROM customers c WHERE c.state = 'BA'", "tags": ["filter", "jargon"]}
+{"id": "olist-0121", "question": "2017 年 11 月下单的订单里，有多少笔延迟送达？", "gold_sql": "SELECT COUNT(*) FROM orders o WHERE strftime('%Y-%m', o.purchased_at) = '2017-11' AND o.delivered_at IS NOT NULL AND date(o.delivered_at) > date(o.estimated_delivery_at)", "tags": ["date", "jargon"]}
+{"id": "olist-0122", "question": "圣保罗州的客户贡献了多少销售额？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN customers c ON c.id = o.customer_id WHERE c.state = 'SP' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "money", "jargon"]}
+{"id": "olist-0123", "question": "2018 年 1 月下单的订单里，有多少笔延迟送达？", "gold_sql": "SELECT COUNT(*) FROM orders o WHERE strftime('%Y-%m', o.purchased_at) = '2018-01' AND o.delivered_at IS NOT NULL AND date(o.delivered_at) > date(o.estimated_delivery_at)", "tags": ["date", "jargon"]}
+{"id": "olist-0124", "question": "2017 年 6 月的销售额是多少？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE strftime('%Y-%m', o.purchased_at) = '2017-06' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "date", "money", "jargon"]}
+{"id": "olist-0125", "question": "寄往巴伊亚州的订单平均送达天数是多少？", "gold_sql": "SELECT AVG(julianday(o.delivered_at) - julianday(o.purchased_at)) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.state = 'BA' AND o.delivered_at IS NOT NULL", "tags": ["join", "date", "jargon"]}
+{"id": "olist-0126", "question": "巴伊亚州的客户一共下了多少笔订单？", "gold_sql": "SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.state = 'BA'", "tags": ["join"]}
+{"id": "olist-0127", "question": "米纳斯吉拉斯州有多少个卖家？", "gold_sql": "SELECT COUNT(*) FROM sellers s WHERE s.state = 'MG'", "tags": ["filter"]}
+{"id": "olist-0128", "question": "里约热内卢州的客户一共下了多少笔订单？", "gold_sql": "SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.state = 'RJ'", "tags": ["join"]}
+{"id": "olist-0129", "question": "里约热内卢州的客户贡献了多少销售额？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN customers c ON c.id = o.customer_id WHERE c.state = 'RJ' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "money", "jargon"]}
+{"id": "olist-0130", "question": "南部大区有多少个卖家？", "gold_sql": "SELECT COUNT(*) FROM sellers se JOIN states s ON s.code = se.state WHERE s.region_zh = '南部'", "tags": ["join"]}
+{"id": "olist-0131", "question": "巴拉那州的客户一共下了多少笔订单？", "gold_sql": "SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.state = 'PR'", "tags": ["join"]}
+{"id": "olist-0132", "question": "巴伊亚州有多少个卖家？", "gold_sql": "SELECT COUNT(*) FROM sellers s WHERE s.state = 'BA'", "tags": ["filter"]}
+{"id": "olist-0133", "question": "手表礼品品类有多少个商品？", "gold_sql": "SELECT COUNT(*) FROM products p WHERE p.category = 'relogios_presentes'", "tags": ["filter"]}
+{"id": "olist-0134", "question": "玩具商品一共被下单了多少件？", "gold_sql": "SELECT COUNT(*) FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE p.category = 'brinquedos'", "tags": ["join"]}
+{"id": "olist-0135", "question": "2017 年 3 月下单的订单里，有多少笔延迟送达？", "gold_sql": "SELECT COUNT(*) FROM orders o WHERE strftime('%Y-%m', o.purchased_at) = '2017-03' AND o.delivered_at IS NOT NULL AND date(o.delivered_at) > date(o.estimated_delivery_at)", "tags": ["date", "jargon"]}
+{"id": "olist-0136", "question": "2017 年 11 月的销售额是多少？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE strftime('%Y-%m', o.purchased_at) = '2017-11' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "date", "money", "jargon"]}
+{"id": "olist-0137", "question": "里约热内卢州有多少个卖家？", "gold_sql": "SELECT COUNT(*) FROM sellers s WHERE s.state = 'RJ'", "tags": ["filter"]}
+{"id": "olist-0138", "question": "巴伊亚州的客户贡献了多少销售额？", "gold_sql": "SELECT SUM(oi.price) FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN customers c ON c.id = o.customer_id WHERE c.state = 'BA' AND o.status NOT IN ('canceled', 'unavailable')", "tags": ["join", "money", "jargon"]}

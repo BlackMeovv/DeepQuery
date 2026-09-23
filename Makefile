@@ -1,4 +1,4 @@
-.PHONY: install demo-db olist-db test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
+.PHONY: install demo-db olist-db olist-set olist-gold olist-eval test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
 
 install:            ## 安装依赖（含 dev）
 	uv sync --extra dev
@@ -44,6 +44,15 @@ business-set:       ## 重新生成自建业务评测集（dev/holdout）
 
 business:           ## 业务集跑分：make business LABEL=baseline
 	uv run python -m deepquery.evalkit.runner --cases eval/cases/business-dev.jsonl --repeats 3 --label $(LABEL)
+
+olist-set:          ## 重新生成 Olist 真实数据评测集（dev/holdout，需先 make olist-db）
+	uv run python -m deepquery.evalkit.olist_set
+
+olist-gold:         ## Olist 评测集自检：gold 回放必须 100%（不需要 API Key）
+	uv run python -m deepquery.evalkit.runner --cases eval/cases/olist-dev.jsonl --db data/olist/olist.sqlite --gold-replay
+
+olist-eval:         ## Olist 真实数据跑分：make olist-eval LABEL=baseline（需要 .env 里的模型 API）
+	uv run python -m deepquery.evalkit.runner --cases eval/cases/olist-dev.jsonl --db data/olist/olist.sqlite --repeats 3 --label $(or $(LABEL),olist-baseline)
 
 serve:              ## 启动服务（网页 http://localhost:8000）
 	uv run deepquery serve
