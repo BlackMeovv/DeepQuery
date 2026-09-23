@@ -163,6 +163,69 @@ class TestAllowedTablesApi:
         assert names == {"customers", "orders"}
 
 
+def guarded_client(settings, db, **overrides):
+    cfg = settings.model_copy(update=overrides)
+    llm = MockLLM(["思路。\n```sql\nSELECT COUNT(*) FROM customers\n```", "共有客户。"], cycle=True)
+    return TestClient(create_app(agent=DeepQuery(cfg, db, llm), settings=cfg)), llm
+
+
+def final_of(resp):
+    return [d for e, d in sse_events(resp.text) if e == "final"][0]
+
+
+class TestPublicDemoGuards:
+    """公网演示防线：限流、每日额度、记忆上限、代理头信任边界。"""
+
+    def test_rate_limit_returns_notice_without_calling_model(self, settings, db):
+        c, llm = guarded_client(settings, db, rate_limit_per_minute=2)
+        with c:
+            for i in range(2):
+                assert final_of(c.get("/api/ask", params={"question": f"客户数{i}？"}))["status"] == "ok"
+            calls = len(llm.calls)
+            resp = c.get("/api/ask", params={"question": "客户数2？"})
+            assert resp.status_code == 200  # EventSource 只能读 200 的事件流
+            final = final_of(resp)
+            assert final["status"] == "failed" and "频繁" in final["answer"]
+            assert len(llm.calls) == calls
+
+    def test_daily_budget_blocks_new_runs_but_serves_cache(self, settings, db):
+        c, llm = guarded_client(settings, db, daily_cost_limit=1e-9)
+        with c:
+            assert final_of(c.get("/api/ask", params={"question": "客户数？"}))["status"] == "ok"
+            blocked = final_of(c.get("/api/ask", params={"question": "另一个问题？"}))
+            assert blocked["status"] == "failed" and "额度" in blocked["answer"]
+            cached = final_of(c.get("/api/ask", params={"question": "客户数？"}))
+            assert cached["cached"] is True  # 已问过的问题不花钱，额度用完仍可用
+
+    def test_memory_note_cap(self, settings, db):
+        from deepquery.server import MAX_NOTES_PER_USER
+
+        c, _ = guarded_client(settings, db)
+        with c:
+            for i in range(MAX_NOTES_PER_USER):
+                assert c.post("/api/memory", json={"note": f"口径 {i}", "user": "v1"}).status_code == 200
+            assert c.post("/api/memory", json={"note": "再来一条", "user": "v1"}).status_code == 429
+            assert c.post("/api/memory", json={"note": "别的访客", "user": "v2"}).status_code == 200
+
+    def test_proxy_header_only_trusted_when_enabled(self, settings, db):
+        ask = lambda c, ip: final_of(c.get("/api/ask", params={"question": "客户数？"}, headers={"X-Real-IP": ip}))
+        trusted, _ = guarded_client(settings, db, rate_limit_per_minute=1, trust_proxy_headers=True)
+        with trusted:
+            assert ask(trusted, "1.1.1.1")["status"] == "ok"
+            assert ask(trusted, "2.2.2.2")["status"] == "ok"  # 不同访客各自计数
+            assert "频繁" in ask(trusted, "1.1.1.1")["answer"]
+        xff = lambda c, v: final_of(c.get("/api/ask", params={"question": "客户数？"}, headers={"X-Forwarded-For": v}))
+        chain, _ = guarded_client(settings, db, rate_limit_per_minute=1, trust_proxy_headers=True)
+        with chain:
+            assert xff(chain, "6.6.6.6, 3.3.3.3")["status"] == "ok"
+            # 客户端伪造的第一段变了，但代理追加的最后一段相同：仍是同一访客
+            assert "频繁" in xff(chain, "7.7.7.7, 3.3.3.3")["answer"]
+        untrusted, _ = guarded_client(settings, db, rate_limit_per_minute=1)
+        with untrusted:
+            assert ask(untrusted, "1.1.1.1")["status"] == "ok"
+            assert "频繁" in ask(untrusted, "2.2.2.2")["answer"]  # 未开启时伪造的头不起作用
+
+
 class TestAccessCode:
     """演示部署访问口令：配了 DEMO_ACCESS_CODE 才启用，healthz/schema 始终开放。"""
 

@@ -8,6 +8,7 @@ import {
   fetchSchema,
   ping,
   setAccessCode,
+  useVisitorId,
   type EnvInfo,
   type FinalPayload,
   type MemoryNote,
@@ -107,6 +108,7 @@ export const useAppStore = defineStore("app", {
       document.body.dataset.theme = this.theme;
       const env = await fetchEnv().catch(() => null);
       if (env) this.env = env;
+      if (env?.protected) useVisitorId(); // 公网演示：记忆按浏览器隔离
       // 演示部署开启口令保护时：先验已存口令，不对再询问（最多三次，取消即放弃）
       if (env?.protected && !(await ping())) {
         for (let i = 0; i < 3; i++) {
@@ -180,7 +182,11 @@ export const useAppStore = defineStore("app", {
 
     // ---- 记忆 ----
     async addMem(note: string) {
-      await addMemory(note);
+      try {
+        await addMemory(note);
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "保存失败");
+      }
       this.mems = await fetchMemory();
     },
     async delMem(id: number) {
@@ -256,7 +262,7 @@ export const useAppStore = defineStore("app", {
           this.stream = null;
           this.persist();
         },
-      }, "default", fresh);
+      }, undefined, fresh);
     },
 
     stop() {

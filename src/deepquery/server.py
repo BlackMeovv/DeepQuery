@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from .agent import DeepQuery, RunOutcome
 from .cache import BaseCache, build_cache, cache_key
 from .config import Settings, get_settings
+from .ratelimit import DailyBudget, SlidingWindowLimiter
 
 # ---------- Prometheus 指标 ----------
 
@@ -43,6 +44,7 @@ TOKENS = Counter("deepquery_llm_tokens_total", "累计 LLM token 消耗")
 COST = Counter("deepquery_llm_cost_total", "累计 LLM 成本（按 .env 单价折算）")
 
 _CHART_NAME = re.compile(r"^chart-[0-9a-f]{12}\.png$")
+MAX_NOTES_PER_USER = 50  # 单个访客的记忆条数上限，防止公网演示时记忆库被灌满
 
 
 class MemoryNote(BaseModel):
@@ -81,6 +83,17 @@ def _node_event(node: str, delta: dict) -> dict:
         if delta.get("chart_error"):
             payload["error_message"] = delta["chart_error"]
     return payload
+
+
+def _notice_payload(message: str) -> dict:
+    """不调用模型的提示（限流 / 额度用完），形状与正常结果一致，前端按"未完成"展示。"""
+    return {
+        "status": "failed", "cached": False, "answer": message, "sql": None,
+        "predicted_sql": None, "columns": [], "rows": [], "row_count": 0, "attempts": [],
+        "selected_tables": None, "context_used": None, "hallucination_blocked": False,
+        "chart_url": None, "chart_error": None,
+        "usage": {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}, "latency_ms": 0,
+    }
 
 
 def _outcome_payload(outcome: RunOutcome, cached: bool = False) -> dict:
@@ -127,6 +140,19 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             allow_headers=["Content-Type"],
         )
     state = {"agent": agent}
+    limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
+    budget = DailyBudget(settings.daily_cost_limit)
+
+    def client_key(request: Request) -> str:
+        if settings.trust_proxy_headers:
+            # X-Real-IP 由 nginx 用 $remote_addr 覆盖写入，可信；X-Forwarded-For 是追加式的，
+            # 前面几段客户端可以伪造，经一层代理时只有最后一段是代理亲眼看到的地址
+            ip = request.headers.get("x-real-ip", "").strip()
+            if not ip:
+                ip = request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
+            if ip:
+                return ip
+        return request.client.host if request.client else "unknown"
 
     def get_agent() -> DeepQuery:
         if state["agent"] is None:  # 惰性构建：测试可注入，生产首个请求时组装
@@ -206,9 +232,14 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         }
 
     @app.post("/api/memory")
-    def memory_add(item: MemoryNote, code: str | None = Query(None, max_length=64)):
+    def memory_add(request: Request, item: MemoryNote, code: str | None = Query(None, max_length=64)):
         require_code(code)
-        return {"id": get_memory().remember(item.user, item.note)}
+        if not limiter.hit(client_key(request)):
+            raise HTTPException(status_code=429, detail="操作太频繁了，请稍等一分钟再试")
+        memory = get_memory()
+        if len(memory.notes(item.user)) >= MAX_NOTES_PER_USER:
+            raise HTTPException(status_code=429, detail=f"记忆最多保存 {MAX_NOTES_PER_USER} 条，请先删除一些")
+        return {"id": memory.remember(item.user, item.note)}
 
     @app.delete("/api/memory/{note_id}")
     def memory_delete(
@@ -234,6 +265,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
 
     @app.get("/api/ask")
     def api_ask(
+        request: Request,
         question: str = Query(..., min_length=1, max_length=2000),
         chart: bool = Query(False),
         user: str = Query("default", max_length=64),
@@ -241,6 +273,12 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         code: str | None = Query(None, max_length=64),
     ):
         require_code(code)
+        sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        if not limiter.hit(client_key(request)):
+            # EventSource 读不到非 200 响应的内容，所以用一条 final 事件把原因告诉用户
+            REQUESTS.labels(status="rate_limited").inc()
+            notice = _sse("final", _notice_payload("请求太频繁了，请稍等一分钟再试。"))
+            return StreamingResponse(iter([notice]), media_type="text/event-stream", headers=sse_headers)
         agent_ = get_agent()
         key = cache_key(
             f"{user}|{question}",
@@ -262,6 +300,10 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                 cached_payload["usage"] = {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}
                 cached_payload["latency_ms"] = int((time.monotonic() - start) * 1000)
                 yield _sse("final", cached_payload)
+                return
+            if budget.exceeded():  # 额度用完后缓存命中仍可用（不花钱），只拦新的模型调用
+                REQUESTS.labels(status="quota_exceeded").inc()
+                yield _sse("final", _notice_payload("今天的演示额度已经用完了，请明天再来。已问过的问题仍可直接查看。"))
                 return
             # 节点事件与回答逐字增量都要实时推送，但增量产生在 ask_stream 内部的
             # LLM 调用期间（此时生成器阻塞在 next() 上）——所以放到工作线程跑，
@@ -302,17 +344,14 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             LATENCY.observe(time.monotonic() - start)
             TOKENS.inc(outcome.usage.get("total_tokens", 0))
             COST.inc(outcome.usage.get("cost", 0.0))
+            budget.add(outcome.usage.get("cost", 0.0))
             if outcome.hallucination_blocked:
                 HALLUCINATION_BLOCKED.inc()
             if outcome.succeeded:
                 cache.set(key, payload)
             yield _sse("final", payload)
 
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return StreamingResponse(stream(), media_type="text/event-stream", headers=sse_headers)
 
     web_dist = Path(settings.web_dist)
     if (web_dist / "index.html").exists():

@@ -149,8 +149,8 @@ onBeforeUnmount(() => document.removeEventListener("click", closeMenu));
     </div>
 
     <div class="foot">
-      <div class="avatar">BM</div>
-      <span class="uname">BlackMeovv</span>
+      <div class="avatar">{{ store.env?.protected ? "访" : "BM" }}</div>
+      <span class="uname">{{ store.env?.protected ? "访客" : "BlackMeovv" }}</span>
       <button class="theme" title="切换主题" @click="store.toggleTheme()">
         <svg v-if="store.theme === 'light'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round">
           <circle cx="12" cy="12" r="4" />

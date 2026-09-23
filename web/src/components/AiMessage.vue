@@ -50,7 +50,12 @@ function copyAnswer() {
           <span class="d"></span><span class="d d2"></span><span class="d d3"></span>
         </span>
       </div>
-      <div v-else class="strip" :class="{ err: msg.status === 'blocked' }" @click="open = !open">
+      <div
+        v-else
+        class="strip"
+        :class="{ err: msg.status === 'blocked' || msg.status === 'failed', warn: msg.status === 'stopped' }"
+        @click="open = !open"
+      >
         <span class="dot" :style="{ background: pill.bg, color: pill.c }">{{ pill.i }}</span>
         <span :style="{ color: pill.c }" class="stitle">{{ pill.t }}</span>
         <span class="smeta">{{ meta }}</span>
@@ -129,6 +134,7 @@ function copyAnswer() {
 .strip:hover { filter: brightness(0.97); }
 .strip.running { background: var(--accbg); }
 .strip.err { background: var(--errbg); }
+.strip.warn { background: var(--warnbg); }
 .ring { animation: spin 0.9s linear infinite; flex: none; }
 .rtitle { color: var(--accdeep); font-weight: 600; }
 .rmeta { color: var(--accink); opacity: 0.75; }

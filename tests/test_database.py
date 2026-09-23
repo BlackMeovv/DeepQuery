@@ -74,3 +74,13 @@ class TestSchema:
         text = db.schema_text()
         assert "CREATE TABLE customers" in text
         assert "样例行" in text
+
+
+class TestValueSizeLimit:
+    def test_huge_value_rejected(self, db):
+        # 回归：行数有上限但单元格没有时，一条查询就能吃掉几百 MB 内存
+        result = db.run_query("SELECT hex(randomblob(2000000))")
+        assert not result.ok and "too big" in (result.error_message or "")
+
+    def test_normal_values_unaffected(self, db):
+        assert db.run_query("SELECT group_concat(name) FROM customers").ok

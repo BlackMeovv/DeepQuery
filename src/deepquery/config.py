@@ -63,8 +63,16 @@ class Settings(BaseSettings):
     server_port: int = 8000
     # 前端联调 CORS：逗号分隔的允许来源（如 http://localhost:5173）；留空则关闭
     cors_allow_origins: str = ""
-    # 演示部署访问口令：配置后 /api/ask 与记忆读写需携带 ?code=（空=关闭）
+    # 演示部署访问口令：配置后 /api/ask 与记忆读写需携带 ?code=（空=关闭）；
+    # 同时前端会给每个浏览器分配独立的访客 ID，记忆按访客隔离
     demo_access_code: str = ""
+    # 公网演示的费用防线（0 = 关闭）：单个访客每分钟最多提问/写记忆次数；
+    # 全站每日模型花费上限（与 LLM_PRICE_* 同币种），超出后只返回已缓存的答案
+    rate_limit_per_minute: int = 0
+    daily_cost_limit: float = 0.0
+    # 部署在 nginx 等反向代理之后时开启：用 X-Real-IP 区分访客。
+    # 只有应用端口不对外暴露时才安全，否则访客可以伪造这个请求头
+    trust_proxy_headers: bool = False
     # Vue 前端构建产物目录：存在则托管为主页（内置单文件页移至 /legacy）
     web_dist: str = "web/dist"
     # 结果缓存：redis://host:6379/0；不配置则用进程内 LRU

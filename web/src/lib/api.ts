@@ -16,6 +16,30 @@ function codeQS(): string {
   return accessCode ? `&code=${encodeURIComponent(accessCode)}` : "";
 }
 
+// ---- 访客 ID：公网演示时每个浏览器一份独立的记忆，互相看不到、改不了 ----
+// 本机单人使用保持 "default"（与 CLI 的 `deepquery remember` 共用同一份记忆）
+const UID_KEY = "dq_visitor_id";
+let userId = "default";
+
+export function useVisitorId() {
+  try {
+    let id = localStorage.getItem(UID_KEY);
+    if (!id) {
+      id = randomId();
+      localStorage.setItem(UID_KEY, id);
+    }
+    userId = id;
+  } catch {
+    userId = randomId(); // 存不了就只在本次会话内隔离
+  }
+}
+
+function randomId(): string {
+  // getRandomValues 在 HTTP 下也可用（randomUUID 只在 HTTPS / localhost 下存在）
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  return "v-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** 校验口令是否正确（不传则用已保存的口令；口令保护未开启时恒为 true）。 */
 export async function ping(code = accessCode): Promise<boolean> {
   const qs = code ? `?code=${encodeURIComponent(code)}` : "";
@@ -86,21 +110,23 @@ export async function fetchSchema(): Promise<SchemaTable[]> {
   return data.tables;
 }
 
-export async function fetchMemory(user = "default"): Promise<MemoryNote[]> {
+export async function fetchMemory(user = userId): Promise<MemoryNote[]> {
   const data = await (await fetch(`/api/memory?user=${encodeURIComponent(user)}${codeQS()}`)).json();
   return data.notes;
 }
 
-export async function addMemory(note: string, user = "default"): Promise<number> {
+export async function addMemory(note: string, user = userId): Promise<number> {
   const resp = await fetch(accessCode ? `/api/memory?code=${encodeURIComponent(accessCode)}` : "/api/memory", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ note, user }),
   });
-  return (await resp.json()).id;
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || "保存失败");
+  return data.id;
 }
 
-export async function deleteMemory(id: number, user = "default"): Promise<void> {
+export async function deleteMemory(id: number, user = userId): Promise<void> {
   await fetch(`/api/memory/${id}?user=${encodeURIComponent(user)}${codeQS()}`, { method: "DELETE" });
 }
 
@@ -117,7 +143,7 @@ export function askStream(
   question: string,
   chart: boolean,
   callbacks: AskCallbacks,
-  user = "default",
+  user = userId,
   fresh = false,
 ): EventSource {
   const url =

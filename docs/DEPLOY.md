@@ -1,107 +1,159 @@
-# 服务器部署指南（在线 Demo）
+# 服务器部署指南
 
-目标：把 DeepQuery 部署到自己的服务器上，对外只需一个链接 + 访问口令，
-访客打开就能真实提问。全程约 10 分钟。
+目标：把 DeepQuery 部署到自己的服务器上，对外给一个链接 + 访问口令，访客打开就能提问。
+
+公网部署和本机运行最大的区别是：**每一次提问都在花你的 API 额度，而访问链接的人你控制不了。**
+所以下面每一步都围绕三件事：别被刷爆账单、访客之间互不影响、服务器本身不暴露多余的口子。
 
 ## 0. 前提
 
-- 一台能访问外网的 Linux 服务器（1核2G 足够），已安装 Docker 与 compose 插件
-- 验证：`docker compose version` 能输出版本号
-- 服务器安全组/防火墙放行你要用的端口（默认 8000）
+- 一台 Linux 服务器（1 核 2G 足够），已安装 Docker 与 compose 插件：`docker compose version` 能输出版本号
+- 一个域名（推荐；没有也能先用 IP 临时访问，见第 4 步末尾）
+- 安全组 / 防火墙放行 80 和 443
 
-## 1. 拉代码
+## 1. 先在模型服务商那里设好消费上限
+
+这一步在服务器之外，但它是**最硬的一道防线**：应用里的所有限制都可能因为配置失误或 bug 失效，
+而服务商后台的额度上限不会。
+
+- 在 API 服务商或中转平台的后台设置每日 / 每月消费上限，或者只充值一笔固定额度
+- 给在线演示**单独开一个 API Key**，不要和你跑评测用的 Key 共用——泄露了只吊销这一个
+
+## 2. 拉代码并配置
 
 ```bash
 git clone https://github.com/BlackMeovv/DeepQuery.git
 cd DeepQuery
-```
-
-## 2. 配置 .env
-
-```bash
 cp .env.example .env
 vim .env
 ```
 
-必改四项：
+`.env` 里需要改的：
 
 ```
-LLM_API_KEY=你的key
-LLM_BASE_URL=你的中转地址/v1
+LLM_API_KEY=演示专用的 key
+LLM_BASE_URL=你的接口地址/v1
 LLM_MODEL=模型名
+
 DEMO_ACCESS_CODE=给访客的访问口令
+RATE_LIMIT_PER_MINUTE=6
+DAILY_COST_LIMIT=1
+TRUST_PROXY_HEADERS=true
+GRAFANA_ADMIN_PASSWORD=换一个强密码
 ```
 
-公网演示建议：
+各项的作用：
 
-- **口令必配**。配了之后提问与记忆读写都要口令，前端会自动弹窗询问并记住；
-  不配等于把你的 API Key 开放给全网刷
-- **模型选快的便宜的**（如 deepseek-chat）。演示场景 5 秒出结果比 40 秒的
-  推理模型体验好得多，效果差距在演示库这种难度下几乎看不出来
-- 保留 `AGENT_MAX_COST_PER_RUN` 预算熔断，单次提问花费有上限
+| 配置 | 作用 |
+|---|---|
+| `DEMO_ACCESS_CODE` | 提问和记忆读写都要口令，前端会弹窗询问并记住。同时每个浏览器分到独立的访客 ID，**记忆按访客隔离**——访客看不到、也改不了别人的记忆 |
+| `RATE_LIMIT_PER_MINUTE` | 每个访客每分钟最多提问次数，超出时界面提示"请求太频繁" |
+| `DAILY_COST_LIMIT` | 全站每日模型花费上限（与 `LLM_PRICE_*` 同币种）。用完后新问题提示"今日额度已用完"，已经问过的问题仍能从缓存直接看到 |
+| `TRUST_PROXY_HEADERS` | 在 nginx 后面时必须打开，否则所有访客会被当成同一个人一起限流。**只有应用端口不对公网开放时才安全**（compose 默认如此） |
+| `AGENT_MAX_COST_PER_RUN` | 单次提问的花费上限（默认 0.05），已默认开启 |
+
+还有两个建议：
+
+- **模型选快的**（如 deepseek-chat）。推理模型一个问题要几十秒，演示时体验很差；演示库难度下准确率差别不大
+- `LLM_PRICE_INPUT_PER_M` / `LLM_PRICE_OUTPUT_PER_M` 填成你所用模型的真实单价，否则每日上限按错误的价格计算
 
 ## 3. 启动
 
-只起应用和缓存（演示够用，省内存）：
-
 ```bash
 docker compose up -d --build app redis
+curl http://127.0.0.1:8000/healthz
 ```
 
-想要完整监控大盘（Prometheus + Grafana）就全起：
+看到 `"ok":true,"protected":true` 即成功。首次构建约 3–5 分钟（包含前端构建）。
+
+compose 默认把所有端口都只绑定在 `127.0.0.1`。这很重要：**Docker 发布的端口会绕过 ufw 等主机防火墙**，
+如果绑定在 `0.0.0.0`，即使 ufw 里没放行也会直接暴露在公网上。所以外部访问一律经过下一步的 nginx。
+
+需要监控大盘时再加 `prometheus grafana`，并通过 SSH 隧道访问，不要对外开放：
 
 ```bash
-docker compose up -d --build
+docker compose up -d prometheus grafana
+ssh -L 3000:127.0.0.1:3000 你的用户@服务器IP
 ```
 
-首次构建约 3-5 分钟（含 Vue 前端构建）。起来后：
+然后在本机浏览器打开 `http://localhost:3000`。
 
-```bash
-curl http://localhost:8000/healthz
-```
+## 4. nginx + HTTPS
 
-看到 `"ok":true,"protected":true` 即成功。浏览器打开
-`http://服务器IP:8000`，输入口令即可提问。
-
-## 4. 域名 + HTTPS（可选，更体面）
-
-有域名的话加一层 nginx 反代，对外的链接就是 `https://dq.你的域名`：
+新建 `/etc/nginx/conf.d/deepquery.conf`：
 
 ```nginx
+# 访问口令在 URL 参数里，日志只记路径不记参数
+log_format dq_noargs '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent';
+
 server {
+    listen 80;
     server_name dq.example.com;
+    access_log /var/log/nginx/deepquery.access.log dq_noargs;
+
+    # 监控指标只给内部的 Prometheus 抓取
+    location = /metrics { deny all; }
+
     location / {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
 }
 ```
 
-注意 `proxy_buffering off` 与长超时——SSE 流式必需，否则运行过程不会实时推送。
-证书用 certbot 一条命令：`certbot --nginx -d dq.example.com`。
+然后：
 
-## 5. 日常运维
+```bash
+nginx -t
+systemctl reload nginx
+certbot --nginx -d dq.example.com
+```
+
+几个配置的原因：
+
+- `X-Real-IP $remote_addr`：由 nginx 写入真实来源地址，覆盖访客自己伪造的同名请求头，限流才能按人计算
+- `proxy_buffering off` 和较长的 `proxy_read_timeout`：流式输出必需，否则回答不会逐字出现
+- HTTPS：访问口令在 URL 里，不加密的话途经的网络都能看到
+
+**暂时没有域名**：可以在 `.env` 里设 `APP_BIND=0.0.0.0`、把 `TRUST_PROXY_HEADERS` 改回 `false`，
+重新 `docker compose up -d app` 后用 `http://服务器IP:8000` 访问。这种方式没有 HTTPS，只适合短时间自己测试。
+
+## 5. 上线前自检
+
+- [ ] 服务商后台已设消费上限，演示用的是单独的 API Key
+- [ ] 浏览器打开网站会弹出口令框；输错口令无法提问
+- [ ] 连续快速提问，第 7 次左右出现"请求太频繁"
+- [ ] 用两个不同的浏览器（或一个开无痕窗口）分别添加记忆，互相看不到
+- [ ] 从本机执行 `curl http://服务器IP:8000/healthz` 连不上（说明应用端口没有直接暴露）
+- [ ] `curl https://dq.example.com/metrics` 返回 403
+- [ ] 回答是逐字出现的，而不是等很久一次性出来
+
+## 6. 日常运维
 
 ```bash
 docker compose logs -f app
-git pull
-docker compose up -d --build app
+git pull && docker compose up -d --build app
 docker compose down
 ```
 
-依次是：看日志、更新代码后重建、整体下线。数据（演示库/记忆/图表）在
-named volume `app-data` 里，重建不丢。
+依次是：看日志、更新代码后重建、整体下线。演示库、记忆和图表在 named volume `app-data` 里，重建不会丢。
 
-## 6. 安全边界
+口令外泄时：改 `.env` 里的 `DEMO_ACCESS_CODE`，再执行 `docker compose up -d app`，旧口令立即失效。
 
-- 数据库三重只读 + AST 守卫，演示库随时可由 `deepquery.demo_data` 重新生成，
-  没有可损毁的东西
-- 访问口令用 `hmac.compare_digest` 比较（防时序侧信道）；因 SSE 的
-  EventSource 无法携带自定义请求头，口令走查询参数——这也是为什么建议上 HTTPS
-- 图表代码在容器内以 subprocess + rlimit 执行，容器本身是隔离边界
-- 预算熔断兜底：口令泄露最坏情况也只是有限的 API 花费
-- 表级权限：`.env` 配 `ALLOWED_TABLES=orders,products` 可让公开演示只暴露
-  部分表——schema 注入、守卫白名单、前端库表树、MCP 工具同步过滤
+## 7. 防护一览
+
+| 风险 | 措施 |
+|---|---|
+| 链接被转发、额度被刷光 | 访问口令 + 每访客限流 + 全站每日花费上限 + 单次提问预算，最外层是服务商后台的消费上限 |
+| 访客互相干扰或写入恶意"记忆" | 记忆按浏览器隔离，每个访客最多 50 条 |
+| 模型写出修改数据的 SQL | 语法树守卫只放行单条 SELECT；数据库以只读方式打开；演示库随时可重新生成 |
+| 超大查询结果撑爆内存 | 结果行数上限 + 单个值 1MB 上限 |
+| 模型生成的画图代码 | 在容器内以带资源限额的子进程执行，产物只接受普通 PNG 文件，不跟随符号链接 |
+| 端口意外暴露 | 所有容器端口只绑定本机，对外只开 nginx 的 80 / 443；`/metrics` 禁止外部访问 |
+| 口令在网络上被截获 | HTTPS；nginx 日志不记录 URL 参数 |
+| 只想公开部分数据 | `.env` 中 `ALLOWED_TABLES=orders,products`，模型看不到也查不了其余的表 |

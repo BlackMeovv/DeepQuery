@@ -17,6 +17,8 @@ from pathlib import Path
 
 from .contract import QueryResult
 
+MAX_VALUE_BYTES = 1_000_000  # 单个值（字符串/BLOB）上限，远大于任何正常的分析结果
+
 _ALLOWED_AUTH_OPS = {
     sqlite3.SQLITE_SELECT,
     sqlite3.SQLITE_READ,
@@ -41,6 +43,9 @@ class ReadOnlyDatabase:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         conn.execute("PRAGMA query_only=ON")
+        # 行数有上限但单元格没有：SELECT hex(randomblob(1e8)) 能一条查询吃掉几百 MB 内存。
+        # 限制单个字符串/BLOB 的长度，超限时报 "string or blob too big"
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
 
         def authorizer(action, arg1, arg2, db_name, trigger):
             if action in _ALLOWED_AUTH_OPS:

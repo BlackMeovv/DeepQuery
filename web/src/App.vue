@@ -6,8 +6,10 @@ import SideBar from "./components/SideBar.vue";
 import { useAppStore } from "./stores/app";
 
 const store = useAppStore();
-onMounted(() => {
-  store.init();
+onMounted(async () => {
+  // 先完成初始化（取环境、验访问口令、分配访客 ID），再处理链接里的 ?q= 提问，
+  // 否则公网部署下这条提问会在口令就绪前发出而失败，且落在共享的 default 访客上
+  await store.init();
   // ?theme=dark|light 与 ?q=…&chart=1：分享链接 / 录 demo 用
   const params = new URLSearchParams(location.search);
   const theme = params.get("theme");
