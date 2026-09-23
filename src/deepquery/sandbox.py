@@ -239,15 +239,19 @@ class SubprocessSandbox(BaseSandbox):
             # 输出写到主进程持有的临时文件而不是管道：代码 fork 出的后台子进程会继承管道，
             # 用管道就得等它们全部退出才能读完，一个留后台的进程就能让每次执行都拖到超时
             with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as out:
-                proc = subprocess.Popen(
-                    [sys.executable, "-I", "chart.py"],
-                    cwd=workdir,
-                    env=env,
-                    stdout=out,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,  # 独立进程组：超时时连同它的子进程一起杀掉
-                    preexec_fn=limits if os.name == "posix" else None,
-                )
+                try:
+                    proc = subprocess.Popen(
+                        [sys.executable, "-I", "chart.py"],
+                        cwd=workdir,
+                        env=env,
+                        stdout=out,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,  # 独立进程组：超时时连同它的子进程一起杀掉
+                        preexec_fn=limits if os.name == "posix" else None,
+                    )
+                except (OSError, subprocess.SubprocessError) as e:
+                    # 典型原因：Python 解释器装在隔离用户读不到的目录里。图表失败不能拖垮整次提问
+                    return SandboxResult(ok=False, error=f"图表沙箱启动失败：{e}")
                 try:
                     returncode = proc.wait(timeout=self.timeout_seconds)
                 except subprocess.TimeoutExpired:

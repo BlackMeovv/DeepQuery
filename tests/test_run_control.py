@@ -254,3 +254,47 @@ class TestHeartbeat:
             text = c.get("/api/ask", params={"question": "订单数？"}).text
         assert ": ping" in text  # 保活注释行（浏览器的 EventSource 会忽略）
         assert _final(text)["status"] == "ok"  # 不影响正常的事件与最终结果
+
+
+class TestFailuresReachTheUser:
+    """出错时前端要拿到能看懂的结果，而不是连接被异常断开（线上表现为"连接中断"）。"""
+
+    def test_sandbox_start_failure_is_a_result_not_an_exception(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from deepquery.sandbox import SubprocessSandbox
+
+        def denied(*_a, **_k):
+            raise PermissionError(13, "Permission denied", "/app/.venv/bin/python")
+
+        monkeypatch.setattr(subprocess, "Popen", denied)
+        result = SubprocessSandbox(timeout_seconds=5).run("print(1)", {"columns": [], "rows": []}, tmp_path)
+        assert not result.ok and "启动失败" in result.error
+
+    def test_chart_crash_only_fails_the_chart(self, settings, db, tmp_path):
+        chart_code = "画柱状图。\n```python\nimport json\n```"
+        llm = MockLLM([SQL_REPLY, chart_code, ANSWER])
+        cfg = settings.model_copy(update={"chart_executor": "subprocess", "chart_out_dir": str(tmp_path)})
+        agent = DeepQuery(cfg, db, llm)
+
+        class Boom:
+            name = "boom"
+
+            def run(self, *_a, **_k):
+                raise PermissionError(13, "Permission denied")
+
+        agent._sandbox = Boom()
+        out = agent.ask("订单数？", generate_chart=True)
+        assert out.status == "ok" and out.answer  # 回答照常给出
+        assert out.chart_path is None and "PermissionError" in out.chart_error
+
+    def test_unexpected_error_becomes_a_final_event(self, settings, db):
+        class Broken(DeepQuery):
+            def ask_stream(self, *a, **k):
+                yield ("node", "generate_sql", {"thought": "x"})
+                raise RuntimeError("意外错误")
+
+        app = create_app(agent=Broken(settings, db, MockLLM(["x"])), settings=settings)
+        with TestClient(app) as c:
+            final = _final(c.get("/api/ask", params={"question": "订单数？"}).text)
+        assert final["status"] == "failed" and "RuntimeError" in final["answer"]

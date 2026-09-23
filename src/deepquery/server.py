@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import threading
 import time
@@ -48,6 +49,8 @@ TOKENS = Counter("deepquery_llm_tokens_total", "累计 LLM token 消耗")
 COST = Counter("deepquery_llm_cost_total", "累计 LLM 成本（按 .env 单价折算）")
 
 _CHART_NAME = re.compile(r"^chart-[0-9a-f]{12}\.png$")
+logger = logging.getLogger("deepquery.server")
+
 MAX_NOTES_PER_USER = 50  # 单个访客的记忆条数上限，防止公网演示时记忆库被灌满
 MAX_NOTES_TOTAL = 20_000  # 全库上限：访客 ID 由客户端生成，只按访客限制挡不住换 ID 刷库
 # SSE 心跳间隔（秒）：模型写 SQL、思考回答时可能十几秒没有任何输出，
@@ -402,7 +405,14 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                     if kind == "end":
                         break
                     if kind == "error":
-                        raise item
+                        # 记下完整堆栈（docker compose logs 里可查），再给前端一个能看懂的结果，
+                        # 而不是让连接异常断开、前端只能显示"连接中断"
+                        logger.error("提问运行出错", exc_info=item)
+                        REQUESTS.labels(status="error").inc()
+                        yield _sse("final", _notice_payload(
+                            f"服务出错了（{type(item).__name__}），请重试；如果反复出现，请管理员查看服务日志。"
+                        ))
+                        return
                     if kind == "outcome":
                         outcome = item
                         continue

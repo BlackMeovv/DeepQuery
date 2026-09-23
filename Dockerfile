@@ -1,7 +1,9 @@
 # deepquery 服务镜像
 # 基础镜像与 npm 源可通过构建参数替换（国内服务器拉不到 ghcr.io / npm 官方源时用，见 .env.example）
 ARG NODE_IMAGE=node:20-alpine
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# Python 版本与 .python-version（3.11）一致：用镜像自带的解释器，不让 uv 另外下载——
+# 下载版会装进 /root（只有 root 能读），图表沙箱换成无权限用户后连 Python 都启动不了
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
 # 阶段一：构建 Vue 前端（web/dist 不入库，镜像内自行构建）
 FROM ${NODE_IMAGE} AS webbuild
@@ -16,7 +18,7 @@ RUN npm run build
 FROM ${UV_IMAGE}
 
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_PREFERENCE=only-system
 
 # 先装依赖层（利用缓存），再拷代码
 COPY pyproject.toml uv.lock ./
@@ -37,6 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends fonts-wqy-micro
     mkdir -p /opt/mplconfig && \
     /app/.venv/bin/python -c "import matplotlib.font_manager" && \
     chmod -R a+rX /opt/mplconfig
+
+# 依赖在构建时已装好：运行时的 uv run 不再同步环境（否则每次启动都要联网重建项目）
+ENV UV_NO_SYNC=1
 
 EXPOSE 8000
 # 启动前：数据目录只允许 root 访问（图表子进程换成无权限 uid 后读不到记忆库等数据）；

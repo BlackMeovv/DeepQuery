@@ -751,7 +751,10 @@ class DeepQuery:
         if self._sandbox is None:
             self._sandbox = build_sandbox(self.settings)
         data = {"columns": result.columns, "rows": [list(row) for row in result.rows]}
-        sandbox_result = self._sandbox.run(code, data, self.settings.chart_out_dir)
+        try:
+            sandbox_result = self._sandbox.run(code, data, self.settings.chart_out_dir)
+        except Exception as e:  # noqa: BLE001 —— 图表是锦上添花，失败不能中断回答
+            return {"chart_error": f"图表执行失败：{type(e).__name__}: {e}"}
         self._trace(state).span(
             "chart_sandbox",
             metadata={

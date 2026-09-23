@@ -157,12 +157,12 @@ DB_PATH=data/olist/olist.sqlite
 - 第 1 步里 **ghcr 连不上**（大陆常见）：追加下面两行。镜像代理地址不保证长期可用，先用 `docker pull` 试，拉不下来就改用第 5 步末尾的"本机构建再上传"。
 
 ```
-UV_IMAGE=ghcr.nju.edu.cn/astral-sh/uv:python3.12-bookworm-slim
+UV_IMAGE=ghcr.nju.edu.cn/astral-sh/uv:python3.11-bookworm-slim
 NPM_REGISTRY=https://registry.npmmirror.com
 ```
 
 ```bash
-docker pull ghcr.nju.edu.cn/astral-sh/uv:python3.12-bookworm-slim
+docker pull ghcr.nju.edu.cn/astral-sh/uv:python3.11-bookworm-slim
 ```
 
 **通过标准**：下面这条命令列出的值都正确（不打印 Key 本身）：

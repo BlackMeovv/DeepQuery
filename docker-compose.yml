@@ -12,7 +12,7 @@ services:
       context: .
       args:
         NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
-        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:python3.12-bookworm-slim}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
     ports:
       - "${APP_BIND:-127.0.0.1}:8000:8000"
