@@ -111,6 +111,7 @@ _NODE_LABELS = {
     "fallback": "降级收尾",
     "clarify": "需要向你确认",
     "explain": "依据表结构回答",
+    "reply": "直接回复",
 }
 
 

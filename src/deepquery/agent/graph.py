@@ -6,6 +6,8 @@
                           →（轮次/预算耗尽）→ fallback
     generate_sql →（交互模式：需要确认）→ clarify
                  →（交互模式：问口径/表结构，不用查数据）→ explain
+                 →（交互模式：闲聊）→ reply
+    整句寒暄（你好 / 你是谁 / 谢谢）不调用模型，直接进 reply
 
 渐进式披露（schema 装不下时）：先走 browse_schema——模型看表目录选表、申请查看列取值，
 系统展开选中表的完整定义后再进 generate_sql；修复前自动补展开 SQL 里用到但还没展开的表。
@@ -30,10 +32,10 @@ from typing import Any, TypedDict
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 
-from .. import disclosure
+from .. import disclosure, smalltalk
 from ..budget import BudgetExceeded, RunHandle, UsageMeter
 from ..config import Settings
-from ..datasets import knowledge_paths
+from ..datasets import for_db, knowledge_paths
 from ..guard import tables_in_sql, validate
 from ..llm import BaseLLM, LLMError
 from ..retrieval import SchemaRetriever, build_embedder, load_examples, load_glossary
@@ -62,7 +64,7 @@ class Attempt:
 class RunOutcome:
     question: str
     # ok / ok_empty / ok_meta（问口径、表结构，依据 schema 直接回答、没有查数据）
-    # / failed / budget_exceeded / needs_clarification
+    # / ok_chat（打招呼、问你是谁这类闲聊，直接回应）/ failed / budget_exceeded / needs_clarification
     status: str
     answer: str = ""
     final_sql: str | None = None  # 实际执行的 SQL（守卫改写后，含注入的 LIMIT）
@@ -81,7 +83,7 @@ class RunOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return self.status in ("ok", "ok_empty", "ok_meta")
+        return self.status in ("ok", "ok_empty", "ok_meta", "ok_chat")
 
 
 class _State(TypedDict, total=False):
@@ -116,6 +118,7 @@ class _State(TypedDict, total=False):
     value_notes: list[str]  # 已查出的列取值说明（拼在表结构之后）
     probed: list[str]  # 已查过取值的 表.列，避免重复查
     step_detail: str  # 本节点对外展示的补充说明（如"展开了哪些表"），只随本节点的事件发出
+    small_talk: str | None  # 整句寒暄的类型（intro / thanks）：不调用模型直接回复
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -179,6 +182,13 @@ def extract_clarification(text: str) -> dict | None:
             return {"question": question[:120], "term": term[:30], "options": options}
     return None
 
+
+# 闲聊的字面信号：模型用 answer 块回应闲聊时，问题里得有这类说法（同样是为了挡住偷懒的数据回答）
+_CHAT_CUE = re.compile(
+    r"你是谁|你是什么|你叫什么|介绍一下你|介绍你|自我介绍|你能做什么|你能干什么|你可以做什么|你会做什么|"
+    r"你会什么|能做什么|怎么用你|如何使用|什么模型|哪个模型|你好|您好|谢谢|天气|笑话",
+    re.IGNORECASE,
+)
 
 # "问口径 / 表结构"的字面信号。不查数据直接回答，只在问题里出现这类说法时才接受：
 # 否则"销售额最高的品类是哪个"这种数据问题，模型偷懒报个品类名（不带数字）也能通过数字校验
@@ -541,6 +551,7 @@ class DeepQuery:
             "expanded_tables": [],
             "value_notes": [],
             "probed": [],
+            "small_talk": smalltalk.kind(question) if interactive else None,
             "attempts": [],
             "generate_answer": generate_answer,
             "generate_chart": generate_chart,
@@ -617,11 +628,15 @@ class DeepQuery:
         g.add_node("fallback", self._node_fallback)
         g.add_node("clarify", self._node_clarify)
         g.add_node("explain", self._node_explain)
+        g.add_node("reply", self._node_reply)
 
         g.add_conditional_edges(
             START,
-            lambda s: "browse_schema" if s.get("schema_mode") == "disclose" else "generate_sql",
-            {"browse_schema": "browse_schema", "generate_sql": "generate_sql"},
+            lambda s: (
+                "reply" if s.get("small_talk")
+                else "browse_schema" if s.get("schema_mode") == "disclose" else "generate_sql"
+            ),
+            {"reply": "reply", "browse_schema": "browse_schema", "generate_sql": "generate_sql"},
         )
         g.add_conditional_edges(
             "browse_schema",
@@ -631,7 +646,10 @@ class DeepQuery:
         g.add_conditional_edges(
             "generate_sql",
             self._route_after_generate,
-            {"execute": "execute", "fallback": "fallback", "clarify": "clarify", "explain": "explain"},
+            {
+                "execute": "execute", "fallback": "fallback", "clarify": "clarify",
+                "explain": "explain", "reply": "reply",
+            },
         )
         g.add_conditional_edges(
             "execute",
@@ -648,6 +666,7 @@ class DeepQuery:
         g.add_edge("fallback", END)
         g.add_edge("clarify", END)
         g.add_edge("explain", END)
+        g.add_edge("reply", END)
         return g.compile()
 
     # ---------- nodes ----------
@@ -789,7 +808,8 @@ class DeepQuery:
             # 不查数据的回答有两道检查，不过就退回去让模型写 SQL 查：
             # 1. 问题本身得是在问口径 / 表结构，数据问题不能凭表结构作答；
             # 2. 出现的数字必须能在 schema / 口径 / 对话上下文里找到，否则就是没查数据却在报数
-            if not _META_CUE.search(state["question"]):
+            about_meta = _META_CUE.search(state["question"])
+            if not (about_meta or _CHAT_CUE.search(state["question"])):
                 nudge = prompts.META_NEEDS_DATA
                 self._trace(state).span("meta_answer_check", metadata={"rejected": "needs_data"})
             else:
@@ -797,7 +817,7 @@ class DeepQuery:
                 violations = check_answer(meta, None, state["question"], sources)
                 self._trace(state).span("meta_answer_check", metadata={"violations": violations})
                 if not violations:
-                    return {"status": "ok_meta", "answer": meta, "thought": thought}
+                    return {"status": "ok_meta" if about_meta else "ok_chat", "answer": meta, "thought": thought}
                 nudge = prompts.META_NUDGE.format(violations="、".join(violations))
             messages = messages + [
                 {"role": "assistant", "content": reply.text},
@@ -812,6 +832,8 @@ class DeepQuery:
             return "clarify"
         if status == "ok_meta":
             return "explain"
+        if status == "ok_chat":
+            return "reply"
         if status in ("budget_exceeded", "failed"):
             return "fallback"
         return "execute"
@@ -819,6 +841,17 @@ class DeepQuery:
     def _node_clarify(self, state: _State) -> _State:
         self._trace(state).span("clarify", metadata=state.get("clarification") or {})
         return {}
+
+    def _node_reply(self, state: _State) -> _State:
+        """闲聊：模型已经回应过（ok_chat）就直接结束；整句寒暄不调用模型，用固定的自我介绍回复。"""
+        if state.get("status") == "ok_chat":
+            return {}
+        ds = for_db(self.settings.db_path)
+        note = self.settings.dataset_note or (ds.description if ds else "")
+        samples = [s["q"] for s in (ds.samples if ds else ()) if not s.get("tag")]
+        text = smalltalk.reply(state.get("small_talk") or "intro", note, samples, sorted(self._snap.table_docs))
+        self._trace(state).span("small_talk", metadata={"kind": state.get("small_talk")})
+        return {"status": "ok_chat", "answer": text}
 
     def _node_explain(self, state: _State) -> _State:
         """问口径 / 表结构：回答已在 generate_sql 里给出，这里只留一条追踪记录。"""

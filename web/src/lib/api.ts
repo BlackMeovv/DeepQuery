@@ -97,8 +97,8 @@ export interface Clarification {
 }
 
 export interface FinalPayload {
-  // ok_meta：问的是口径 / 表结构，依据 schema 直接回答，没有查询数据
-  status: "ok" | "ok_empty" | "ok_meta" | "failed" | "budget_exceeded" | "needs_clarification";
+  // ok_meta：问的是口径 / 表结构，依据 schema 直接回答，没有查询数据；ok_chat：打招呼、问"你是谁"等闲聊
+  status: "ok" | "ok_empty" | "ok_meta" | "ok_chat" | "failed" | "budget_exceeded" | "needs_clarification";
   cached: boolean;
   answer: string;
   sql: string | null;

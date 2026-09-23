@@ -59,6 +59,7 @@ export interface AiMsg {
   noClarify?: boolean; // 这是回答确认后的追问：不再允许反问（重跑时沿用）
   clarifySkipped?: boolean; // 用户选择跳过确认、改问别的
   meta?: boolean; // 问的是口径 / 表结构：依据 schema 直接回答，没有查询数据
+  chat?: boolean; // 打招呼、问"你是谁"这类闲聊：直接回应，不查数据、不算进追问上下文
 }
 
 export type Msg = UserMsg | AiMsg;
@@ -75,6 +76,7 @@ const NODE_LABELS: Record<string, string> = {
   fallback: "降级收尾",
   clarify: "需要向你确认",
   explain: "依据表结构回答",
+  reply: "直接回复",
 };
 
 // 追问时带给后端的上下文：最近两轮已完成的问答（与后端 HistoryTurn 的长度上限一致）
@@ -83,7 +85,7 @@ const HISTORY_TURNS = 2;
 function historyOf(msgs: Msg[]): HistoryTurn[] {
   const turns: HistoryTurn[] = [];
   for (const m of msgs) {
-    if (m.role !== "ai" || !["done", "cached", "blocked"].includes(m.status)) continue;
+    if (m.role !== "ai" || !["done", "cached", "blocked"].includes(m.status) || m.chat) continue;
     if (!m.sql && !m.answer) continue;
     turns.push({
       question: m.q.slice(0, 500),
@@ -298,6 +300,7 @@ export const useAppStore = defineStore("app", {
               : p.status.startsWith("ok") ? "done" : "failed",
             clarification: needsClarify ? p.clarification : null,
             meta: p.status === "ok_meta",
+            chat: p.status === "ok_chat",
             sql: p.sql,
             rawSql: p.predicted_sql,
             answer: p.hallucination_blocked || needsClarify ? undefined : p.answer,
