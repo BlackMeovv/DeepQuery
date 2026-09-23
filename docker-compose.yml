@@ -6,7 +6,12 @@
 # 注意 Docker 发布的端口会绕过 ufw 等主机防火墙，绑定 0.0.0.0 就等于对全网开放。
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:python3.12-bookworm-slim}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
     ports:
       - "${APP_BIND:-127.0.0.1}:8000:8000"
     env_file:

@@ -1,14 +1,19 @@
 # deepquery 服务镜像
+# 基础镜像与 npm 源可通过构建参数替换（国内服务器拉不到 ghcr.io / npm 官方源时用，见 .env.example）
+ARG NODE_IMAGE=node:20-alpine
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
 # 阶段一：构建 Vue 前端（web/dist 不入库，镜像内自行构建）
-FROM node:20-alpine AS webbuild
+FROM ${NODE_IMAGE} AS webbuild
+ARG NPM_REGISTRY=
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi && npm ci
 COPY web/ ./
 RUN npm run build
 
 # 阶段二：Python 服务
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ${UV_IMAGE}
 
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy

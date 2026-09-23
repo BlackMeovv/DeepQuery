@@ -208,6 +208,7 @@ deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # uv syn
 ## 更多
 
 - [docs/DEPLOY.md](docs/DEPLOY.md)：服务器部署、nginx 反代、访问口令、切换真实数据
+- [docs/SERVER-RUNBOOK.md](docs/SERVER-RUNBOOK.md)：从全新服务器到上线的逐步执行清单
 - [docs/benchmarks.md](docs/benchmarks.md)：BIRD / Spider 接入与统计口径
 - [docs/badcases.md](docs/badcases.md)：失败案例逐条复盘
 - [docs/frontend-spec.md](docs/frontend-spec.md)：SSE 事件与 API 约定
