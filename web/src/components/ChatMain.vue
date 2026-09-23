@@ -7,6 +7,7 @@ import Composer from "./Composer.vue";
 
 const store = useAppStore();
 const scroller = ref<HTMLElement | null>(null);
+const col = ref<HTMLElement | null>(null);
 
 // 示例问题由后端按数据集提供；带标签的几条故意问得模糊 / 超出数据范围，用来体验 Agent 先向你确认
 const samples = computed(() => store.env?.samples ?? []);
@@ -23,6 +24,27 @@ watch(
 );
 // 确认面板比输入框高，出现时把最后一条消息顶上来
 watch(() => store.pendingClarify?.id, toBottom);
+
+// 不在底部时，在输入框上方的渐变里显示"回到底部"
+const atBottom = ref(true);
+function checkBottom() {
+  const el = scroller.value;
+  if (el) atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+}
+function scrollDown() {
+  scroller.value?.scrollTo({ top: scroller.value.scrollHeight, behavior: "smooth" });
+}
+// 内容变高（回答逐字输出、结果表出现）时：原本在底部就跟着到底，用户往上翻过就不打扰，只显示按钮
+function onGrow() {
+  if (atBottom.value) scroller.value?.scrollTo({ top: scroller.value.scrollHeight });
+  else checkBottom();
+}
+watch(col, (el, _prev, onCleanup) => {
+  if (!el) return;
+  const ro = new ResizeObserver(onGrow);
+  ro.observe(el);
+  onCleanup(() => ro.disconnect());
+});
 </script>
 
 <template>
@@ -77,8 +99,8 @@ watch(() => store.pendingClarify?.id, toBottom);
     </template>
 
     <template v-else>
-      <div ref="scroller" class="msgs">
-        <div class="col">
+      <div ref="scroller" class="msgs" @scroll.passive="checkBottom">
+        <div ref="col" class="col">
           <template v-for="m in store.msgs" :key="m.id">
             <div v-if="m.role === 'user'" class="urow">
               <div class="ububble">{{ m.text }}</div>
@@ -88,6 +110,11 @@ watch(() => store.pendingClarify?.id, toBottom);
         </div>
       </div>
       <div class="cbottom">
+        <button class="tobottom" :class="{ show: !atBottom }" title="回到底部" @click="scrollDown">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14M6 13l6 6 6-6" />
+          </svg>
+        </button>
         <div class="cwrap">
           <ClarifyDock v-if="store.pendingClarify" :key="store.pendingClarify.id" :msg="store.pendingClarify" />
           <Composer v-else placeholder="继续追问，或换一个问题…" />
@@ -141,10 +168,24 @@ watch(() => store.pendingClarify?.id, toBottom);
 .stag { font-size: 11.5px; color: var(--accink); background: var(--accbg); border-radius: 999px; padding: 2px 10px; flex: none; }
 .sarrow { margin-left: auto; color: var(--acc); font-size: 15px; }
 
-.msgs { flex: 1; overflow-y: auto; padding: 28px 28px 8px; }
+.msgs { flex: 1; overflow-y: auto; padding: 28px 28px 40px; }
 .col { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
 .urow { display: flex; justify-content: flex-end; }
 .ububble { max-width: 76%; background: var(--surface); border-radius: var(--r-md); border-bottom-right-radius: 4px; padding: 10px 18px; font-size: 15px; }
-.cbottom { flex: none; padding: 10px 28px 20px; display: flex; justify-content: center; }
+.cbottom { flex: none; padding: 4px 28px 20px; display: flex; justify-content: center; position: relative; background: var(--card); }
+/* 消息滚到输入框上方时渐隐，而不是被一条硬边切断（右侧让出滚动条） */
+.cbottom::before {
+  content: ""; position: absolute; left: 0; right: 12px; bottom: 100%; height: 48px; pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--card) 85%);
+}
+.tobottom {
+  position: absolute; left: 50%; bottom: calc(100% + 2px); z-index: 1;
+  width: 32px; height: 32px; border-radius: 50%; cursor: pointer; padding: 0;
+  border: 1px solid var(--line); background: var(--paper); color: var(--ink2); box-shadow: var(--sh-sm);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; transform: translate(-50%, 6px); pointer-events: none; transition: opacity 0.18s, transform 0.18s;
+}
+.tobottom.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.tobottom:hover { background: var(--soft); color: var(--ink); }
 .cwrap { width: 100%; max-width: 680px; }
 </style>
