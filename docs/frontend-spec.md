@@ -125,7 +125,7 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 3. 数字列判定：整列 `null | number` 即右对齐 + 等宽字体
 4. `hallucination_blocked: true` → 回答区用警示样式并说明"已降级为原始查询结果"
 5. 历史/主题存 localStorage；支持 `?q=…&chart=1` 打开即自动执行（录 demo 用）
-6. `needs_clarification`：把 question 和 options 渲染成可点选的卡片。口径类（有 term）把选择拼回原问题
+6. `needs_clarification`：消息里显示 question，输入框替换为底部确认面板（options 编号可点选，数字键 / ↑↓ + Enter 选择，Esc 跳过，末行可自由输入）。口径类（有 term）把选择拼回原问题
    `原问题（补充说明：「term」指选项）` 再以 `clarify=0` 提问，可选地 `POST /api/memory` 存为 `「term」指：选项`；
    缺数据类（term 为空）直接以选项作为新问题提问。确认结果不进缓存
 

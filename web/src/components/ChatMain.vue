@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useAppStore } from "../stores/app";
 import AiMessage from "./AiMessage.vue";
+import ClarifyDock from "./ClarifyDock.vue";
 import Composer from "./Composer.vue";
 
 const store = useAppStore();
@@ -20,10 +21,13 @@ const greetHead = computed(() => {
   return h < 6 ? "凌晨好，" : h < 12 ? "早上好，" : h < 18 ? "下午好，" : "晚上好，";
 });
 
+const toBottom = () => nextTick(() => scroller.value?.scrollTo({ top: scroller.value.scrollHeight }));
 watch(
   () => store.msgs.length + store.msgs.reduce((n, m) => n + (m.role === "ai" ? m.steps.length : 0), 0),
-  () => nextTick(() => scroller.value?.scrollTo({ top: scroller.value.scrollHeight })),
+  toBottom,
 );
+// 确认面板比输入框高，出现时把最后一条消息顶上来
+watch(() => store.pendingClarify?.id, toBottom);
 </script>
 
 <template>
@@ -87,7 +91,8 @@ watch(
       </div>
       <div class="cbottom">
         <div class="cwrap">
-          <Composer :placeholder="store.pendingClarify ? '选一个上面的选项，或直接输入你的意思…' : '继续追问，或换一个问题…'" />
+          <ClarifyDock v-if="store.pendingClarify" :key="store.pendingClarify.id" :msg="store.pendingClarify" />
+          <Composer v-else placeholder="继续追问，或换一个问题…" />
         </div>
       </div>
     </template>

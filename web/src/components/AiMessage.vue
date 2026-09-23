@@ -31,15 +31,15 @@ const meta = computed(() => {
   return `${m.steps.length} 步${dur}${errs ? ` · ${errs} 次失败重试` : ""}`;
 });
 
-// 确认卡片：口径类可以顺手存为记忆，以后同样的说法不再反问
-const remember = ref(false);
-const clarifyOpen = computed(
-  () => props.msg.status === "clarify" && !props.msg.clarifyAnswered && !props.msg.clarifySkipped,
-);
-
-function pick(choice: string) {
-  store.answerClarification(props.msg.id, choice, remember.value);
-}
+// 确认的选项在底部面板里（ClarifyDock），消息里只留问题和结果
+const clarifyState = computed(() => {
+  const m = props.msg;
+  if (m.clarifyAnswered) {
+    return m.clarification?.term ? `已按「${m.clarifyAnswered}」继续查询` : `已改问：${m.clarifyAnswered}`;
+  }
+  if (m.clarifySkipped) return "已跳过";
+  return store.pendingClarify?.id === m.id ? "" : "未回答"; // 等待中：选项就在下方面板
+});
 
 function copyAnswer() {
   if (props.msg.answer) navigator.clipboard?.writeText(props.msg.answer);
@@ -121,30 +121,8 @@ function copyAnswer() {
     </div>
 
     <div v-if="msg.status === 'clarify' && msg.clarification" class="clarify">
-      <div class="cq">{{ msg.clarification.question }}</div>
-      <template v-if="clarifyOpen">
-        <div v-if="msg.clarification.options.length" class="copts">
-          <button
-            v-for="o in msg.clarification.options"
-            :key="o"
-            class="copt"
-            :disabled="store.running"
-            @click="pick(o)"
-          >{{ o }}</button>
-        </div>
-        <div class="cfoot">
-          <label v-if="msg.clarification.term">
-            <input v-model="remember" type="checkbox" />
-            记住我的选择，以后「{{ msg.clarification.term }}」都按它理解
-          </label>
-          <span v-else>也可以在下方直接输入你的意思</span>
-          <span class="cskip" @click="store.skipClarification(msg.id)">跳过，问别的</span>
-        </div>
-      </template>
-      <div v-else-if="msg.clarifyAnswered" class="cdone">
-        {{ msg.clarification.term ? `已按「${msg.clarifyAnswered}」继续查询` : `已改问：${msg.clarifyAnswered}` }}
-      </div>
-      <div v-else class="cdone">已跳过</div>
+      <div class="answer">{{ msg.clarification.question }}</div>
+      <div v-if="clarifyState" class="cstate">{{ clarifyState }}</div>
     </div>
 
     <div v-if="msg.answer && msg.status !== 'blocked'" class="answer">{{ msg.answer }}</div>
@@ -200,23 +178,8 @@ function copyAnswer() {
 .blocked { background: var(--errbg); border-radius: var(--r-md); padding: 12px 16px; }
 .btitle { font-size: 13.5px; font-weight: 600; color: var(--err); margin-bottom: 2px; }
 .btext { font-size: 13.5px; color: var(--ink2); white-space: pre-wrap; }
-.clarify { background: var(--accbg); border-radius: var(--r-md); padding: 14px 18px; display: flex; flex-direction: column; gap: 11px; }
-.cq { font-size: 15px; line-height: 1.7; color: var(--ink); }
-.copts { display: flex; flex-wrap: wrap; gap: 8px; }
-.copt {
-  border: 1px solid var(--acc); background: var(--paper); color: var(--accdeep); cursor: pointer;
-  border-radius: 999px; padding: 6px 15px; font-size: 13.5px; font-family: inherit; text-align: left;
-}
-.copt:hover { background: var(--acc); color: var(--paper); }
-body[data-theme="dark"] .copt:hover { color: #201e1d; }
-.copt:disabled { opacity: 0.5; cursor: default; }
-.copt:disabled:hover { background: var(--paper); color: var(--accdeep); }
-.cfoot { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: var(--ink3); flex-wrap: wrap; }
-.cfoot label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.cfoot input { accent-color: var(--acc); margin: 0; }
-.cskip { margin-left: auto; cursor: pointer; }
-.cskip:hover { color: var(--accink); }
-.cdone { font-size: 12.5px; color: var(--accink); }
+.clarify { display: flex; flex-direction: column; gap: 6px; }
+.cstate { font-size: 12.5px; color: var(--accink); }
 .answer { font-size: 15.5px; line-height: 1.85; color: var(--ink); white-space: pre-wrap; }
 .chart { max-width: 100%; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--paper); }
 .charterr { font-size: 12.5px; color: var(--warn); }
