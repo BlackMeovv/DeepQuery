@@ -68,7 +68,7 @@ A 236-question in-house set plus BIRD; clustered confidence intervals, and every
 
 **🧭 Context engineering**
 
-The full schema is used when it fits; table retrieval only kicks in above a size threshold. Glossary, examples and user memory are injected on demand
+The full schema is used when it fits; above a size threshold it is disclosed progressively: a table catalog first (about 11–15% of the full definitions), then full definitions of the tables the model picks, and real column values on demand. Glossary, examples and user memory are injected on demand
 
 </td>
 <td width="33%" valign="top">

@@ -7,6 +7,9 @@
     generate_sql →（交互模式：需要确认）→ clarify
                  →（交互模式：问口径/表结构，不用查数据）→ explain
 
+渐进式披露（schema 装不下时）：先走 browse_schema——模型看表目录选表、申请查看列取值，
+系统展开选中表的完整定义后再进 generate_sql；修复前自动补展开 SQL 里用到但还没展开的表。
+
 内层（repair 节点内部是手写的 Reason-Act-Observe 循环）：
     观察全部历史尝试与结构化错误 → 生成修正 SQL
     → 重复 SQL 检测：与历史重复时注入"换思路"提示再试一次
@@ -25,12 +28,13 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 from langgraph.errors import GraphRecursionError
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
+from .. import disclosure
 from ..budget import BudgetExceeded, RunHandle, UsageMeter
 from ..config import Settings
 from ..datasets import knowledge_paths
-from ..guard import validate
+from ..guard import tables_in_sql, validate
 from ..llm import BaseLLM, LLMError
 from ..retrieval import SchemaRetriever, build_embedder, load_examples, load_glossary
 from ..sandbox import build_sandbox
@@ -104,6 +108,14 @@ class _State(TypedDict, total=False):
     interactive: bool  # 在线问答：结果给人看（名单默认前 10、匿名 ID 带辨认列）；评测时关闭
     clarification: dict  # 模型提出的澄清问题
     conversation: str  # 同一会话里之前几轮的问题 / SQL / 回答（追问时理解指代用；评测为空）
+    schema_mode: str  # full（全量直供）/ retrieve（检索选表）/ disclose（渐进式披露）
+    schema_snap: Any  # 本次运行使用的 schema 快照
+    knowledge_context: str  # 业务口径 / 相似例句 / 用户记忆（渐进式披露时与表结构分开拼）
+    lookup: str  # 检索口径、例句用的文本（追问时带上上一问）
+    expanded_tables: list[str]  # 渐进式披露：已展开完整定义的表
+    value_notes: list[str]  # 已查出的列取值说明（拼在表结构之后）
+    probed: list[str]  # 已查过取值的 表.列，避免重复查
+    step_detail: str  # 本节点对外展示的补充说明（如"展开了哪些表"），只随本节点的事件发出
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -206,6 +218,20 @@ def plain_answer(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
+def _expand_detail(tables: list[str], probed: list[str]) -> str:
+    text = f"展开 {'、'.join(tables)} 的完整定义" if tables else "没有选出表"
+    return text + (f"；查看 {'、'.join(probed)} 的真实取值" if probed else "")
+
+
+def _repair_detail(new_tables: list[str], probed: list[str]) -> str:
+    parts = []
+    if probed:
+        parts.append(f"查看了 {'、'.join(probed)} 的真实取值")
+    if new_tables:
+        parts.append(f"补充展开 {'、'.join(new_tables)} 的完整定义")
+    return "；".join(parts)
+
+
 def extract_code(text: str, langs: tuple[str, ...] = ("python", "py")) -> str:
     """提取代码块：优先匹配语言标签，其次第一个非空块，最后整段文本。"""
     blocks = [(lang.lower(), body.strip()) for lang, body in _CODE_BLOCK.findall(text or "")]
@@ -240,6 +266,8 @@ class _SchemaSnapshot:
     table_docs: dict
     full_schema: str
     retriever: Any
+    columns: dict  # 表 → 列名清单（渐进式披露的目录、查列取值时核对列名）
+    catalog: dict  # 表 → 一行目录（表名 + 说明 + 列名）
 
 
 def resolve_allowed_tables(settings: Settings, db) -> set[str]:
@@ -304,12 +332,17 @@ class DeepQuery:
         fingerprint = fp() if callable(fp) else ""
         allowed = frozenset(resolve_allowed_tables(self.settings, self.db))
         docs = {t: doc for t, doc in self.db.schema_by_table().items() if t in allowed}
+        list_columns = getattr(self.db, "table_columns", None)
+        raw = list_columns() if callable(list_columns) else {}
+        columns = {t: [c["name"] for c in raw.get(t, [])] for t in docs}
         return _SchemaSnapshot(
             fingerprint=fingerprint,
             allowed_tables=allowed,
             table_docs=docs,
             full_schema="\n\n".join(docs.values()),
             retriever=SchemaRetriever(docs, embedder=build_embedder(self.settings)),
+            columns=columns,
+            catalog=disclosure.build_catalog(docs, columns),
         )
 
     def maybe_refresh_schema(self) -> str:
@@ -332,43 +365,56 @@ class DeepQuery:
                 self._snap = self._load_schema()  # 单次引用赋值：读者要么见旧快照，要么见新快照
         return self._snap.fingerprint
 
-    def _build_schema_context(
-        self, question: str, snap: _SchemaSnapshot, user_id: str = "default"
-    ) -> tuple[str, list[str] | None, dict]:
-        """按问题组装 schema 上下文（基于调用方传入的同一份快照）。
+    def _schema_mode(self, snap: _SchemaSnapshot) -> str:
+        """决定这次怎么把表结构交给模型：full / retrieve / disclose。
 
-        大库不能全量塞 prompt（贵且触发 Lost in the Middle）——auto 模式按
-        全量 schema 体积决定是否检索选表。装得下就直供：BIRD 消融中两者 EX
-        无统计差异，而检索只省约 3% token、却多一处召回失败点；命中的业务字典
-        与相似例句始终附加。
+        大库不能全量塞 prompt（贵且触发 Lost in the Middle）。auto 按全量体积判断：
+        装得下就直供——BIRD 消融中直供不低于检索选表，而检索只省约 3% token、多一处召回失败点；
+        装不下走渐进式披露：目录里每张表都看得见，漏选的表在修复时还能补上。
         """
         mode = self.settings.schema_rag
-        k = self.settings.schema_rag_top_k
+        if mode == "on":
+            return "retrieve"
+        if mode == "disclose":
+            return "disclose"
         full_chars = sum(len(d) for d in snap.table_docs.values())
-        use_rag = mode == "on" or (
-            mode == "auto"
-            and len(snap.table_docs) > k
+        too_big = (
+            len(snap.table_docs) > self.settings.schema_rag_top_k
             and full_chars > self.settings.schema_rag_auto_max_chars
         )
-        if use_rag:
-            selected = snap.retriever.top_tables(question, k)
-            context = "\n\n".join(snap.table_docs[t] for t in selected)
-        else:
-            selected = None
-            context = snap.full_schema
+        return "disclose" if mode == "auto" and too_big else "full"
 
+    def _build_schema_context(
+        self, question: str, snap: _SchemaSnapshot, user_id: str = "default"
+    ) -> tuple[str, str, list[str] | None, dict, str]:
+        """按问题组装上下文（基于调用方传入的同一份快照）。
+
+        返回 (表结构, 业务知识, 检索选中的表, 注入明细, 模式)。业务口径、相似例句、用户记忆
+        始终按问题检索后附加；渐进式披露时表结构由 browse_schema 节点再决定展开哪些。
+        """
+        mode = self._schema_mode(snap)
+        selected: list[str] | None = None
+        if mode == "retrieve":
+            selected = snap.retriever.top_tables(question, self.settings.schema_rag_top_k)
+            schema = "\n\n".join(snap.table_docs[t] for t in selected)
+        elif mode == "full":
+            schema = snap.full_schema
+        else:
+            schema = ""
+
+        knowledge = ""
         top_n = self.settings.knowledge_top_n
         glossary_hits = self._glossary.top(question, top_n)
         if glossary_hits:
-            context += "\n\n业务字典（口径定义）：\n" + "\n".join(e.body for e in glossary_hits)
+            knowledge += "\n\n业务字典（口径定义）：\n" + "\n".join(e.body for e in glossary_hits)
         example_hits = self._examples.top(question, top_n)
         if example_hits:
-            context += "\n\n相似问题参考：\n" + "\n\n".join(e.body for e in example_hits)
+            knowledge += "\n\n相似问题参考：\n" + "\n\n".join(e.body for e in example_hits)
         memory_hits: list[str] = []
         if self.memory is not None:
             memory_hits = self.memory.recall(user_id, question, top_n)
             if memory_hits:
-                context += "\n\n该用户的口径偏好（跨会话记忆，优先遵循）：\n" + "\n".join(
+                knowledge += "\n\n该用户的口径偏好（跨会话记忆，优先遵循）：\n" + "\n".join(
                     f"- {m}" for m in memory_hits
                 )
         # 本次实际注入的上下文明细（UI 的"上下文"面板与可解释性用）
@@ -377,7 +423,7 @@ class DeepQuery:
             "examples": [e.key for e in example_hits],
             "memories": memory_hits,
         }
-        return context, selected, context_used
+        return schema, knowledge, selected, context_used, mode
 
     # ---------- public ----------
 
@@ -478,7 +524,7 @@ class DeepQuery:
         # 追问常常省略主语（"那按月呢"）：检索口径、例句和记忆时带上上一轮的问题
         turns = [t for t in (history or []) if t.get("question")]
         lookup = f"{turns[-1]['question']} {question}" if turns else question
-        schema_context, selected_tables, context_used = self._build_schema_context(
+        schema, knowledge, selected_tables, context_used, mode = self._build_schema_context(
             lookup, snap, user_id=user_id
         )
         # context_used 含用户私有记忆原文：只能随本次运行传递，绝不能挂在共享的
@@ -487,7 +533,14 @@ class DeepQuery:
             trace.span("schema_rag", metadata={"selected_tables": selected_tables})
         state: _State = {
             "question": question,
-            "schema_context": schema_context,
+            "schema_context": schema + knowledge,
+            "schema_mode": mode,
+            "schema_snap": snap,
+            "knowledge_context": knowledge,
+            "lookup": lookup,
+            "expanded_tables": [],
+            "value_notes": [],
+            "probed": [],
             "attempts": [],
             "generate_answer": generate_answer,
             "generate_chart": generate_chart,
@@ -513,6 +566,8 @@ class DeepQuery:
         attempts: list[Attempt] = final.get("attempts", [])
         last_ok = next((a for a in reversed(attempts) if a.ok), None)
         executed_sql, raw_sql = self._pick_final(final, attempts, last_ok)
+        if final.get("schema_mode") == "disclose":
+            selected_tables = list(final.get("expanded_tables") or [])  # 渐进式披露：实际展开的表
         outcome = RunOutcome(
             question=question,
             status=final.get("status", "failed"),
@@ -553,6 +608,7 @@ class DeepQuery:
 
     def _build_graph(self):
         g = StateGraph(_State)
+        g.add_node("browse_schema", self._node_browse_schema)
         g.add_node("generate_sql", self._node_generate_sql)
         g.add_node("execute", self._node_execute)
         g.add_node("repair", self._node_repair)
@@ -562,7 +618,16 @@ class DeepQuery:
         g.add_node("clarify", self._node_clarify)
         g.add_node("explain", self._node_explain)
 
-        g.set_entry_point("generate_sql")
+        g.add_conditional_edges(
+            START,
+            lambda s: "browse_schema" if s.get("schema_mode") == "disclose" else "generate_sql",
+            {"browse_schema": "browse_schema", "generate_sql": "generate_sql"},
+        )
+        g.add_conditional_edges(
+            "browse_schema",
+            lambda s: "fallback" if s.get("status") in ("budget_exceeded", "failed") else "generate_sql",
+            {"generate_sql": "generate_sql", "fallback": "fallback"},
+        )
         g.add_conditional_edges(
             "generate_sql",
             self._route_after_generate,
@@ -606,17 +671,88 @@ class DeepQuery:
             system += prompts.INTERACTIVE_RULES
         return system
 
+    def _context(self, state: _State) -> str:
+        """写 SQL 用的上下文：表结构 + 业务知识 +（查过的话）列的真实取值。"""
+        if state.get("schema_mode") == "disclose":
+            snap: _SchemaSnapshot = state["schema_snap"]
+            text = disclosure.compose(snap.table_docs, snap.catalog, state.get("expanded_tables") or [])
+            text += state.get("knowledge_context", "")
+        else:
+            text = state["schema_context"]
+        notes = state.get("value_notes")
+        if notes:
+            text += "\n\n列的真实取值（按出现次数从多到少，核对过滤条件的写法用）：\n" + "\n".join(notes)
+        return text
+
     def _sql_user(self, state: _State) -> str:
         """写 SQL 的用户消息：schema 上下文 +（有的话）对话上下文 + 本轮问题。"""
         if state.get("conversation"):
             return prompts.SQL_USER_WITH_HISTORY_TEMPLATE.format(
-                schema=state["schema_context"],
+                schema=self._context(state),
                 history=state["conversation"],
                 question=state["question"],
             )
-        return prompts.SQL_USER_TEMPLATE.format(
-            schema=state["schema_context"], question=state["question"]
-        )
+        return prompts.SQL_USER_TEMPLATE.format(schema=self._context(state), question=state["question"])
+
+    def _probe(self, state: _State, pairs: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+        """查列的真实取值（同一列一次运行只查一次）。返回 (取值说明, 查过的 表.列)。"""
+        done = set(state.get("probed") or [])
+        notes, keys = [], []
+        for table, column in pairs:
+            key = f"{table}.{column}"
+            if key in done:
+                continue
+            done.add(key)
+            keys.append(key)
+            note = disclosure.probe_values(self.db, table, column)
+            if note:
+                notes.append(note)
+        if keys:
+            self._trace(state).span("value_probe", metadata={"columns": keys})
+        return notes, keys
+
+    def _node_browse_schema(self, state: _State) -> _State:
+        """渐进式披露第一步：模型只看表目录，选出要展开的表、要查取值的列。"""
+        snap: _SchemaSnapshot = state["schema_snap"]
+        history = state.get("conversation")
+        messages = [
+            {"role": "system", "content": prompts.BROWSE_SYSTEM},
+            {
+                "role": "user",
+                "content": prompts.BROWSE_USER_TEMPLATE.format(
+                    catalog="\n".join(snap.catalog.values()),
+                    knowledge=state.get("knowledge_context", ""),
+                    history=f"之前的对话（最近的在最后）：\n{history}\n\n" if history else "",
+                    question=state["question"],
+                ),
+            },
+        ]
+        top_k = self.settings.schema_rag_top_k
+        lookup = state.get("lookup") or state["question"]
+        try:
+            reply = self.llm.chat(messages, state["meter"], tag="browse_schema")
+        except BudgetExceeded:
+            return {"status": "budget_exceeded", "give_up_reason": "预算超限"}
+        except LLMError:
+            # 选表失败不致命：退回检索选表，照常往下走
+            tables = snap.retriever.top_tables(lookup, top_k)
+            return {"expanded_tables": tables, "thought": "浏览表目录失败，改用检索选表", "step_detail": _expand_detail(tables, [])}
+        self._record_generation(state, "browse_schema", messages, reply)
+        tables, probes = disclosure.parse_request(reply.text, set(snap.table_docs), snap.columns)
+        if not tables:
+            # 没按格式给出表：直接写了 SQL 就用它引用的表，否则退回检索选表
+            used = tables_in_sql(extract_sql(reply.text), self.db.dialect)
+            tables = [t for t in snap.table_docs if t.lower() in used] or snap.retriever.top_tables(lookup, top_k)
+        tables = (tables + [t for t, _c in probes if t not in tables])[: self.settings.schema_disclose_max_tables]
+        notes, probed = self._probe(state, [(t, c) for t, c in probes if t in tables])
+        self._trace(state).span("browse_schema", metadata={"tables": tables, "probed": probed})
+        return {
+            "expanded_tables": tables,
+            "value_notes": (state.get("value_notes") or []) + notes,
+            "probed": (state.get("probed") or []) + probed,
+            "thought": extract_thought(reply.text),
+            "step_detail": _expand_detail(tables, probed),
+        }
 
     def _node_generate_sql(self, state: _State) -> _State:
         system = self._sql_system(state)
@@ -657,7 +793,7 @@ class DeepQuery:
                 nudge = prompts.META_NEEDS_DATA
                 self._trace(state).span("meta_answer_check", metadata={"rejected": "needs_data"})
             else:
-                sources = "\n".join((state["schema_context"], state.get("conversation", "")))
+                sources = "\n".join((self._context(state), state.get("conversation", "")))
                 violations = check_answer(meta, None, state["question"], sources)
                 self._trace(state).span("meta_answer_check", metadata={"violations": violations})
                 if not violations:
@@ -715,6 +851,14 @@ class DeepQuery:
                 error_message=result.error_message,
                 result=result,
             )
+            missing = self._impossible_filters(state, sql_raw, result)
+            if missing:
+                # COUNT/SUM 得 0 不会报错，最容易被当成真实答案；过滤值在库里根本不存在时，
+                # 几乎一定是写法不对（中英文、大小写、缩写）——按空结果处理，交给修复轮核对真实取值。
+                # 模型核对后原样重发同一条 SQL，表示确认结果确实为空
+                attempt.ok = False
+                attempt.error_kind = "empty_result"
+                attempt.error_message = f"查询结果为 0 或空值，并且过滤值{'；'.join(missing)}，写法可能不对"
         self._trace(state).span(
             "execute",
             metadata={
@@ -727,6 +871,14 @@ class DeepQuery:
             },
         )
         return {"attempts": state["attempts"] + [attempt]}
+
+    def _impossible_filters(self, state: _State, sql: str, result: QueryResult) -> list[str]:
+        """结果看起来是"没查到"（单行且全为 0 / 空）时，找出在库里一次都没出现过的精确过滤值。"""
+        if not self.settings.repair_value_probe or not disclosure.looks_empty(result):
+            return []
+        snap: _SchemaSnapshot = state.get("schema_snap") or self._snap
+        filters = disclosure.text_filters(sql, snap.columns, self.db.dialect)
+        return disclosure.missing_values(self.db, filters) if filters else []
 
     def _route_after_execute(self, state: _State) -> str:
         if state.get("status") in ("budget_exceeded", "failed"):
@@ -743,6 +895,37 @@ class DeepQuery:
         return "repair"
 
     def _node_repair(self, state: _State) -> _State:
+        """修复前先补充观察（确定性、不调用模型），再进入修复内循环：
+        - 渐进式披露：SQL 里用到但还没展开的表，补上完整定义；
+        - 空结果：查出过滤列真实出现过的取值（最常见的空结果原因是取值写法不对）。"""
+        attempts = state["attempts"]
+        snap: _SchemaSnapshot = state.get("schema_snap") or self._snap
+        updates: dict = {}
+        new_tables: list[str] = []
+        if state.get("schema_mode") == "disclose":
+            expanded = list(state.get("expanded_tables") or [])
+            by_lower = {t.lower(): t for t in snap.table_docs}
+            for a in attempts:
+                for name in sorted(tables_in_sql(a.sql_raw, self.db.dialect)):
+                    real = by_lower.get(name)
+                    if real and real not in expanded:
+                        expanded.append(real)
+                        new_tables.append(real)
+            if new_tables:
+                updates["expanded_tables"] = expanded
+        probed: list[str] = []
+        last = attempts[-1]
+        if last.error_kind == "empty_result" and self.settings.repair_value_probe:
+            pairs = disclosure.filtered_columns(last.sql_raw, snap.columns, self.db.dialect)
+            notes, probed = self._probe(state, pairs)
+            if probed:
+                updates["value_notes"] = (state.get("value_notes") or []) + notes
+                updates["probed"] = (state.get("probed") or []) + probed
+        if new_tables or probed:
+            updates["step_detail"] = _repair_detail(new_tables, probed)
+        return {**updates, **self._repair_loop({**state, **updates})}
+
+    def _repair_loop(self, state: _State) -> _State:
         """手写修复内循环：观察历史 → 生成修正 SQL → 重复检测（最多提醒一次）。"""
         attempts = state["attempts"]
         seen = {normalize_sql(a.sql_raw) for a in attempts}

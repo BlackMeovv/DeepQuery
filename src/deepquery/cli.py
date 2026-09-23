@@ -87,7 +87,22 @@ def _cmd_schema(args: argparse.Namespace) -> int:
 
     settings = _override_db(args)
     db = open_database(settings.db_path)
-    console.print(db.schema_text())
+    if not getattr(args, "catalog", False):
+        console.print(Text(db.schema_text()))
+        return 0
+    # 渐进式披露第 1 层：表目录。顺带报告它和完整定义的体积对比
+    from .disclosure import build_catalog
+    from .llm import estimate_tokens
+
+    docs = db.schema_by_table()
+    columns = {t: [c["name"] for c in cols] for t, cols in db.table_columns().items()}
+    catalog = "\n".join(build_catalog(docs, columns).values())
+    full = "\n\n".join(docs.values())
+    console.print(Text(catalog))
+    console.print(
+        f"[dim]{len(docs)} 张表 · 表目录约 {estimate_tokens([catalog])} tokens · "
+        f"完整定义约 {estimate_tokens([full])} tokens · 目录是完整定义的 {len(catalog) / max(1, len(full)):.0%}[/dim]"
+    )
     return 0
 
 
@@ -238,6 +253,7 @@ def main() -> None:
 
     schema = sub.add_parser("schema", help="查看喂给模型的 schema 上下文")
     schema.add_argument("--db", default=None, help="连接任意 SQLite 库文件")
+    schema.add_argument("--catalog", action="store_true", help="只看表目录（渐进式披露第 1 层）及体积对比")
     schema.set_defaults(func=_cmd_schema)
 
     demo = sub.add_parser("demo-db", help="生成演示数据库")

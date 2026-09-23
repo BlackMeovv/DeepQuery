@@ -102,6 +102,7 @@ class MemoryNote(BaseModel):
     user: str = Field(default="default", max_length=64)
 
 _NODE_LABELS = {
+    "browse_schema": "浏览表目录",
     "generate_sql": "生成 SQL",
     "execute": "守卫校验并执行",
     "repair": "自动修复",
@@ -121,6 +122,8 @@ def _node_event(node: str, delta: dict) -> dict:
     payload: dict = {"node": node, "label": _NODE_LABELS.get(node, node)}
     if delta.get("thought"):
         payload["thought"] = delta["thought"]
+    if delta.get("step_detail"):
+        payload["detail"] = delta["step_detail"]  # 如"展开了哪些表、查了哪些列的取值"
     if node in ("generate_sql", "repair") and delta.get("candidate_sql"):
         payload["sql"] = delta["candidate_sql"]  # 前端先展示思路、再展示生成的 SQL
     attempts = delta.get("attempts")

@@ -33,6 +33,23 @@ make bird ROOT=~/data/bird_dev LABEL=baseline
 make bird ROOT=~/data/bird_dev LABEL=schema-rag
 ```
 
+表结构的三种给法（环境变量切换，其余配置不动，结果按题配对比较）：
+
+```bash
+SCHEMA_RAG=off make bird ROOT=~/data/bird_dev LABEL=full-schema
+SCHEMA_RAG=on make bird ROOT=~/data/bird_dev LABEL=retrieval
+SCHEMA_RAG=disclose make bird ROOT=~/data/bird_dev LABEL=disclose
+```
+
+渐进式披露多一次模型调用（选表），报告里的成本、延迟列会反映出来；选表召回率照常统计
+（按实际展开的表计算）。表目录的体积可以用 `uv run deepquery schema --catalog --db <库文件>` 直接看。
+
+修复时自动查过滤列真实取值的效果，同样用开关做对照：
+
+```bash
+REPAIR_VALUE_PROBE=false make bird ROOT=~/data/bird_dev LABEL=no-value-probe
+```
+
 成本参考：150 条 × 3 次重复 ≈ 450 次调用；按 DeepSeek 价格每次全流程约 0.002-0.01 元，
 一轮全量约 1-5 元。日常改动跑 `make smoke`（20 条演示库冒烟集）即可，全量留给里程碑。
 

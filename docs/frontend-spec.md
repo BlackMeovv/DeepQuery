@@ -94,10 +94,12 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 **`event: node`**（每完成一个节点推一条，驱动右栏运行过程）：
 ```json
 {
-  "node": "generate_sql | execute | repair | chart | summarize | fallback | clarify | explain",
+  "node": "browse_schema | generate_sql | execute | repair | chart | summarize | fallback | clarify | explain",
   "label": "生成 SQL",
   "thought": "模型的一句话思路（generate_sql/repair 才有，可无）",
   "sql": "生成的 SQL（generate_sql/repair 才有）",
+  // 补充说明（browse_schema/repair 可能有）：如"展开 orders 的完整定义；查看 orders.status 的真实取值"
+  "detail": "…",
   "ok": false,               // 仅 execute/chart 携带
   "error_kind": "no_such_column",   // 失败时携带：结构化错误分类
   "error_message": "…"

@@ -162,10 +162,20 @@ class TestSchemaRagAutoBySize:
         assert outcome.selected_tables is None
         assert llm.calls[0][1]["content"].count("CREATE TABLE") == 6
 
-    def test_oversized_schema_enables_rag(self, settings, db):
+    def test_oversized_schema_uses_progressive_disclosure(self, settings, db):
+        # 装不下：不再一次性检索选表，而是先给表目录、让模型选表再展开
         cfg = settings.model_copy(
             update={"schema_rag": "auto", "schema_rag_top_k": 2, "schema_rag_auto_max_chars": 10}
         )
+        browse = "要用客户表。\n```tables\ncustomers\n```"
+        agent, llm = make_agent(cfg, db, [browse, sql_reply(GOOD_SQL)])
+        outcome = agent.ask("上海的客户数？", generate_answer=False)
+        assert outcome.status == "ok" and outcome.selected_tables == ["customers"]
+        assert "表目录" in llm.calls[0][1]["content"]
+        assert llm.calls[1][1]["content"].count("CREATE TABLE") == 1  # 只展开选中的表
+
+    def test_retrieval_still_available(self, settings, db):
+        cfg = settings.model_copy(update={"schema_rag": "on", "schema_rag_top_k": 2})
         agent, _ = make_agent(cfg, db, [sql_reply(GOOD_SQL)])
         outcome = agent.ask("上海的客户数？", generate_answer=False)
         assert outcome.selected_tables is not None and len(outcome.selected_tables) == 2

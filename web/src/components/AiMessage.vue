@@ -98,6 +98,7 @@ function copyAnswer() {
         <div class="sbody">
           <div class="slabel">{{ s.label }}</div>
           <div v-if="s.thought" class="sthought">{{ s.thought }}</div>
+          <div v-if="s.detail" class="sdetail">{{ s.detail }}</div>
           <pre v-if="s.sql" class="ssql mono"><span v-for="(t, j) in tokenizeSql(prettySql(s.sql))" :key="j" :style="{ color: t.c }">{{ t.t }}</span></pre>
           <div v-if="s.err" class="serr mono">{{ s.err }}</div>
         </div>
@@ -197,6 +198,7 @@ function copyAnswer() {
 .sbody { min-width: 0; }
 .slabel { font-size: 13px; color: var(--ink); }
 .sthought { font-size: 12.5px; color: var(--ink3); margin-top: 1px; }
+.sdetail { font-size: 12px; color: var(--accink); margin-top: 2px; }
 .serr { font-size: 12.5px; color: var(--err); margin-top: 2px; }
 .thinking { display: flex; align-items: flex-start; gap: 14px; }
 .skel { flex: 1; display: flex; flex-direction: column; gap: 10px; padding-top: 7px; }

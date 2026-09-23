@@ -75,6 +75,7 @@ function copySql() {
             <div class="sbody">
               <div class="slabel">{{ s.label }}</div>
               <div v-if="s.thought" class="sthought">{{ s.thought }}</div>
+              <div v-if="s.detail" class="sdetail">{{ s.detail }}</div>
               <div v-if="s.err" class="serr mono">{{ s.err }}</div>
             </div>
           </div>
@@ -170,6 +171,7 @@ function copySql() {
 .sbody { min-width: 0; }
 .slabel { font-size: 13.5px; color: var(--ink); }
 .sthought { font-size: 12.5px; color: var(--ink3); margin-top: 1px; }
+.sdetail { font-size: 12px; color: var(--accink); margin-top: 2px; }
 .serr { font-size: 12.5px; color: var(--err); margin-top: 2px; }
 .hr { height: 1px; background: var(--line); }
 .out { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px; }

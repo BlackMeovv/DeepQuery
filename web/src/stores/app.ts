@@ -23,6 +23,7 @@ export type MsgStatus = "running" | "done" | "blocked" | "cached" | "stopped" | 
 export interface Step {
   label: string;
   thought?: string;
+  detail?: string; // 如"展开了哪些表、查了哪些列的真实取值"
   sql?: string;
   err?: string;
   state: "run" | "ok" | "error";
@@ -65,6 +66,7 @@ export type Msg = UserMsg | AiMsg;
 interface Convo { id: string; title: string; msgs: Msg[] }
 
 const NODE_LABELS: Record<string, string> = {
+  browse_schema: "浏览表目录",
   generate_sql: "生成 SQL",
   execute: "守卫执行",
   repair: "修正并重试",
@@ -275,13 +277,14 @@ export const useAppStore = defineStore("app", {
           if (e.node === "generate_sql" || e.node === "repair") {
             // 一次模型调用里先想后写：拆成"思考"和"生成 SQL"两步展示；只想不写（要向你确认）时没有第二步
             const first = e.node === "repair" ? "分析失败原因" : "理解问题";
-            if (e.thought || !e.sql) m.steps.push({ label: first, thought: e.thought, state: "ok" });
+            if (e.thought || e.detail || !e.sql) m.steps.push({ label: first, thought: e.thought, detail: e.detail, state: "ok" });
             if (e.sql) m.steps.push({ label: e.node === "repair" ? "改写 SQL" : "生成 SQL", sql: e.sql, state: "ok" });
             return;
           }
           m.steps.push({
             label: NODE_LABELS[e.node] || e.label,
             thought: e.thought,
+            detail: e.detail,
             err: e.ok === false ? `${e.error_kind || ""}${e.error_message ? "：" + e.error_message : ""}` : undefined,
             state: e.ok === false ? "error" : "ok",
           });
@@ -395,6 +398,7 @@ export function nextStepOf(m: AiMsg): string {
     return m.chart ? "生成图表" : "归纳回答";
   }
   if (last.label === "生成图表") return "归纳回答";
+  if (last.label === "浏览表目录") return "理解问题";
   return "守卫执行"; // 生成 SQL / 修正并重试之后都是执行
 }
 

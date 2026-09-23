@@ -27,13 +27,18 @@ class Settings(BaseSettings):
     agent_max_tokens_per_run: int = 200_000
     agent_max_cost_per_run: float = 0.05
 
-    # Schema RAG：on=强制启用 / off=全量 schema / auto=表数超过 top_k 才启用
+    # 表结构怎么交给模型：
+    #   off=全量直供 / on=检索选表（BM25 + 可选向量）/ disclose=渐进式披露（先给表目录，模型选表后再展开）
+    #   auto=装得下就全量直供，装不下走渐进式披露
     schema_rag: str = "auto"
     schema_rag_top_k: int = 6
-    # auto 模式启用检索的阈值：全量 schema 字符数超过它才检索选表。
-    # BIRD 150 题消融：装得下时全量直供与检索选表的配对差异不显著，而检索只省 ~3% token、
-    # 多一个召回失败点——所以按体积而非表数决定
+    # auto 的分界：全量 schema 字符数超过它（且表数多于 top_k）才不再全量直供。
+    # BIRD 150 题消融：全量直供比检索选表高 3.3 个点（配对差异不显著），检索只省 ~3% token、
+    # 多一个召回失败点——所以按体积决定，装不下时用能补救漏选的渐进式披露，而不是一次性检索
     schema_rag_auto_max_chars: int = 16000
+    schema_disclose_max_tables: int = 8  # 渐进式披露一次最多展开几张表
+    # 查询返回空结果时，自动查出过滤列真实出现过的取值交给修复轮（关掉可做消融）
+    repair_value_probe: bool = True
     # 业务字典 / few-shot 例句（jsonl，选填；路径不存在则自动跳过）。
     # 保持默认值时跟随数据集：Olist 库自动改用 eval/knowledge/olist/ 下的口径
     glossary_path: str = "eval/knowledge/glossary.jsonl"

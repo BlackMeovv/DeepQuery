@@ -70,6 +70,7 @@ export interface NodeEvent {
   label: string;
   thought?: string;
   sql?: string; // generate_sql / repair 节点生成的 SQL
+  detail?: string; // 补充说明，如"展开 orders 的完整定义；查看 orders.status 的真实取值"
   ok?: boolean;
   error_kind?: string;
   error_message?: string;
