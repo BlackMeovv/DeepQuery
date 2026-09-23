@@ -1,173 +1,146 @@
-# deepquery
+# DeepQuery
 
-**给业务人员的临时取数助手**：企业里大量长尾问题（"上周华东退货率怎么高了？"）不在任何
-仪表盘上，现状是提数工单排队等分析师写 SQL。deepquery 让不会 SQL 的人一句话拿到数——
-自动完成 **选表 → 生成 SQL → 安全执行 → 出错自纠 → 给出结论**，每个回答可追溯到 SQL 与
-原始结果；自带执行准确率（EX）评测闭环、预算熔断与成本记账。演示库为电商场景（客户/订单/
-商品/支付），架构与库解耦，可接任意 SQLite/MySQL/PostgreSQL（只读账号）。
+[![CI](https://github.com/BlackMeovv/DeepQuery/actions/workflows/ci.yml/badge.svg)](https://github.com/BlackMeovv/DeepQuery/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+[English](README.en.md)
 
-```
-用户提问 → [LangGraph 状态机]
-             ├─ schema_rag     混合检索选表（BM25 + 可选向量，RRF 融合）+ 业务字典/例句注入
-             ├─ generate_sql   基于检索出的 schema 上下文生成 SQL
-             ├─ execute        sqlglot AST 守卫 → 只读执行（超时/行数限额）
-             ├─ repair         手写 Reason-Act-Observe 修复循环（按错误类型定向提示 + 重复检测）
-             ├─ summarize      基于查询结果作答 → 防幻觉校验：每个数字必须有出处，
-             │                 违规先重写一次、仍失败则降级为确定性结果预览
-             └─ fallback       轮次/预算耗尽时的无 LLM 降级收尾
-```
+**用中文问数据，拿到可追溯、可验证的答案。**
 
-## 评测结果（实测，全部可复现）
-
-| 评测集 | 配置 | EX（95% CI） | 说明 |
-|---|---|---|---|
-| 业务集 dev · 165 题 ×3 | baseline | 93.3% [90.8, 95.2] | 失败模式分析 → 定向修复 |
-| 业务集 dev · 165 题 ×3 | 口径注入 + 输出纪律 | **97.8% [96.1, 98.8]** | 按题配对翻转 5:0（零回归） |
-| 业务集 holdout · 71 题 ×3（密封） | 同上 | **97.7% [94.6, 99.0]** | 提升无过拟合 |
-| BIRD dev · 150 题固定子集 | 全量 schema 直供 | **64.7% [56.7, 71.9]** | 参照：BIRD 论文 GPT-4 基线 46.4% |
-| BIRD dev · 150 题固定子集 | 检索选表（RAG） | 61.3% [53.3, 68.8] | 选表召回 95.5%；消融结论：上下文装得下时直供更优 → auto 判据据此改为按 schema 体积 |
-
-复现：`make business LABEL=x` / `make bird ROOT=... LABEL=x`（模型走任意 OpenAI 兼容接口）。
-每次跑分的完整 JSON 与对比报告在 [eval/results/](eval/results/)，
-失败案例逐条复盘（含根因验证与修复前后对比）见 [docs/badcases.md](docs/badcases.md)。
-
-## 界面
-
-对话流 + 回答逐字流式 + 运行过程检查器（步骤思路 / 生成的 SQL / 上下文注入明细），
-每个回答都能点开追溯到 SQL 与原始结果：
+企业里大量临时取数需求不在任何仪表盘上，业务同学只能提工单排队等分析师写 SQL。
+DeepQuery 把"选表 → 写 SQL → 执行 → 出错修正 → 给结论"做成一个 Agent，
+每个回答都能展开到它执行的 SQL 和原始结果。
 
 ![对话与运行过程](docs/assets/ui-run.png)
 
-<details><summary>更多截图：首页 / 暗色主题</summary>
+## 设计思路
 
-![首页](docs/assets/ui-home.png)
+让模型生成 SQL 并不难，难的是**让人敢用它的结果**。DeepQuery 的做法是不依赖模型自觉，
+把可靠性放在确定性的代码里：
 
-![暗色主题](docs/assets/ui-dark.png)
+- **模型只提议，代码来把关。** SQL 先经 sqlglot 语法树校验（只放行单条 SELECT、表白名单、
+  强制行数上限），再以只读方式执行；修复轮次与 token/金额预算都有硬上限。
+- **回答里的每个数字都要有出处。** 数字必须能在查询结果、问题或 SQL 里找到（支持千分位、
+  百分号、万/亿单位的四舍五入匹配），找不到就让模型重写，仍不合格则只返回原始结果表。
+- **改动靠评测说话。** 每次调整都在同一批题上做按题配对比较，结论附带置信区间；
+  消融结果不支持的假设会被写下来并据此修改设计。
 
-</details>
+## 评测结果
 
-## 技术栈
+模型：gpt-5.5（经 OpenAI 兼容接口）。原始结果与逐题记录在 [eval/results/](eval/results/)，
+下表可用 `make report` 从这些 JSON 复算。
+
+| 评测集 | 配置 | EX（95% CI） |
+|---|---|---|
+| 业务集 dev · 165 题 × 3 次 | 基线 | 93.3% [90.1, 95.6] |
+| 业务集 dev · 165 题 × 3 次 | 业务口径注入 + 输出纪律 | **97.8%** [95.5, 98.9] |
+| 业务集 holdout · 71 题 × 3 次 | 同上（调优期间未运行） | **97.7%** [92.3, 99.3] |
+| BIRD dev · 150 题固定子集 | 全量 schema 直供 | 64.7% [56.7, 71.9] |
+| BIRD dev · 150 题固定子集 | 检索选表 | 61.3% [53.3, 68.8] |
+
+EX 为执行准确率：比较结果集而非 SQL 文本，与 BIRD/Spider 口径一致。
+
+**口径修复的提升是真实的。** 在同一批 165 题上按题配对：平均 +4.4 个点，
+95% CI [+1.7, +7.2]；23 题变好、7 题变差，符号检验 p = 0.005。
+失败分析与每类的修复过程见 [docs/badcases.md](docs/badcases.md)。
+
+**检索选表没有带来可测的收益。** BIRD 上两种方式按题配对的差异为 +3.3 个点，
+95% CI [−2.1, +8.7]，p = 0.33，无法区分；而检索只节省约 3% 的 token，
+却多了一个召回失败点（选表召回率 95.5%）。因此默认把完整 schema 直接交给模型，
+只有 schema 超过体积阈值时才启用检索。
+
+**区间的算法。** 同一题重复运行 3 次，结果高度相关，不能当作 495 个独立样本。
+区间按题目聚类估计设计效应（dev 1.52、holdout 2.21）后折算有效样本量再计算。
+
+## 架构
+
+```mermaid
+flowchart LR
+    Q([提问]) --> CTX["上下文组装<br/>schema 直供或检索选表<br/>+ 业务口径 / 例句 / 记忆"]
+    CTX --> GEN[生成 SQL]
+    GEN --> EXE["守卫校验<br/>只读执行"]
+    EXE -- 成功 --> SUM["归纳回答<br/>数字溯源校验"]
+    EXE -- 成功，需要图表 --> CH["生成图表<br/>沙箱执行"]
+    CH --> SUM
+    EXE -- 失败，有余量 --> REP["按错误类型<br/>定向修复"]
+    REP --> EXE
+    EXE -- 轮次或预算用尽 --> FB["降级收尾<br/>不调用模型"]
+    SUM --> OUT([回答 + SQL + 结果])
+    FB --> OUT
+```
+
+外层流转由 LangGraph 状态机负责；修复节点内部是手写的循环：按数据库返回的错误类型
+（表/列不存在、语法错误、超时、守卫拒绝、空结果）给出针对性提示，并检测模型是否在
+重复提交同一条 SQL。
 
 | 层 | 选型 |
 |---|---|
-| Agent 编排 | LangGraph 状态机 + 手写 Reason-Act-Observe 修复内循环 |
-| SQL 安全 | sqlglot AST 守卫（单条 SELECT/表白名单/强制 LIMIT）；SQLite/MySQL/PostgreSQL 三引擎只读接入 |
-| 检索 | 自研 BM25（中文双字分词）+ 可选向量检索（任意 OpenAI 兼容 embeddings），RRF 融合选表 |
-| 服务 | FastAPI + SSE 逐字流式；Redis 结果缓存；Prometheus/Grafana 监控；Langfuse 链路追踪 |
-| 前端 | Vue 3 + Vite + Pinia，自研设计系统与组件（无 UI 库依赖，字体自托管） |
-| 评测 | 自研 evalkit：EX 判分（排序并列容差）、Wilson 95% CI、McNemar 配对检验、BIRD/Spider 适配 |
-| 工程 | uv / pytest（271 个离线用例）/ GitHub Actions CI / Docker 多阶段构建 |
+| Agent 编排 | LangGraph 状态机 + 手写修复循环 |
+| SQL 安全 | sqlglot 语法树守卫；SQLite / MySQL / PostgreSQL 只读接入 |
+| 检索 | BM25（中文单字 + 双字分词）+ 可选向量检索，RRF 融合 |
+| 服务 | FastAPI + SSE 流式；Redis 结果缓存；Prometheus / Grafana；Langfuse 追踪；MCP server |
+| 前端 | Vue 3 + Vite + Pinia，自研样式，无 UI 组件库依赖 |
+| 评测 | 自研 evalkit：执行准确率判分、聚类校正区间、按题配对比较、BIRD / Spider 适配 |
 
 ## 快速开始
 
+需要 [uv](https://docs.astral.sh/uv/) 和任意 OpenAI 兼容的模型接口（DeepSeek、Qwen、Kimi、OpenAI、本地 Ollama 等）。
+
 ```bash
-# 1. 安装依赖（需要 uv：https://docs.astral.sh/uv/）
 make install
-
-# 2. 配置模型 API（任何 OpenAI 兼容接口：DeepSeek / Qwen / Kimi / OpenAI / 本地 Ollama）
-cp .env.example .env   # 然后填入 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
-
-# 3. 生成演示库（确定性电商模拟库：客户/商品/订单/支付，6 张表）
-make demo-db
-
-# 4. 提问
+cp .env.example .env          # 填入 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+make demo-db                  # 生成电商演示库（客户/商品/订单/支付，6 张表）
 make ask Q="下单次数最多的前5名客户是谁？"
-
-# 5. 跑冒烟评测（20 题，报执行准确率/成本/延迟）
-make smoke
-
-# 6. 起服务（SSE 流式网页 http://localhost:8000 + /metrics）
-make serve
-
-# 或者 docker compose 一键起全套（服务+Redis+Prometheus+Grafana 大盘）
-docker compose up --build
+make serve                    # 网页 http://localhost:8000
 ```
 
-## 接入你自己的数据库
+也可以 `docker compose up --build` 一键启动服务、Redis、Prometheus 和 Grafana。
+部署到服务器见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
-agent 与具体数据库**完全解耦**：schema 是连接时运行时自省的（建表语句+注释+样例行），
-守卫按所连引擎的方言解析、提示词按方言渲染、检索索引由所连的库派生，
-没有任何针对演示库的硬编码。支持三种引擎，换库只需改一个连接目标：
+不配置模型 API 也能验证全部工程链路：
 
 ```bash
-deepquery ask "问题" --db /path/to/your.sqlite                        # SQLite 文件
-deepquery ask "问题" --db mysql://readonly:pwd@host:3306/yourdb       # MySQL（uv sync --extra mysql）
-deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # PostgreSQL（--extra postgres）
-# 或在 .env 里改 DB_PATH，服务/CLI 全部跟随
+make test         # 280+ 个离线测试（MockLLM）
+make smoke-gold   # 评测基建自检：gold SQL 回放必须 100%
 ```
 
-服务器引擎的只读纵深：AST 守卫（第一道）+ 会话级只读与语句超时（第二道，
-MySQL `SET SESSION TRANSACTION READ ONLY` / PG `default_transaction_read_only`）+
-**只读数据库账号（硬边界，生产接入的部署要求）**。本地验证：
+## 接入自己的数据库
+
+表结构在连接时自省，守卫按引擎方言解析，没有针对演示库的硬编码。换库只需改连接目标：
 
 ```bash
-make db-dumps && docker compose -f docker-compose.dbs.yml up -d   # 一键起带演示数据的 MySQL+PG
-deepquery ask "上海的客户一共有多少个？" --db mysql://readonly:readonly@localhost:3306/deepquery
+deepquery ask "问题" --db /path/to/your.sqlite
+deepquery ask "问题" --db mysql://readonly:pwd@host:3306/yourdb       # uv sync --extra mysql
+deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # uv sync --extra postgres
 ```
 
-内置电商演示库只是让仓库开箱即跑的样例数据；跑 BIRD 基准时 agent 会在
-几十个从未见过的第三方库上逐题切换（`--db-root`），这本身就是泛化能力的证明。
+生产接入请使用**只读数据库账号**：它是权限的硬边界，应用层守卫是它之上的第二道防线。
+`.env` 中的 `ALLOWED_TABLES` 可以进一步限制 Agent 可见的表。
 
-## 前端（Vue3）
+## 安全设计
 
-`web/` 是正式前端：Vue 3 + Vite + Pinia，Organic 暖色设计（对话流 + 回答逐字流式 +
-运行过程检查器 + 库表结构/记忆/历史侧栏，亮/暗主题，字体自托管不依赖外网）。
-
-```bash
-cd web && npm install
-npm run dev      # 开发：http://localhost:5173（已配好代理到后端 8000）
-npm run build    # 构建后，后端检测到 web/dist 会自动作为主页托管（内置页移至 /legacy）
-```
-
-## 其他入口
-
-```bash
-# MCP server：接入 Claude Desktop / Claude Code 等任意 MCP 客户端
-uv sync --extra mcp && uv run deepquery-mcp
-
-# 跨会话记忆：记住你的口径偏好（按用户隔离）
-deepquery remember "我说的销售额一律指已完成订单的成交金额"
-deepquery ask "这个月销售额多少？" --chart    # --chart 生成沙箱图表
-
-# 压测（服务端先用 LLM_MOCK=1 起，测工程链路吞吐，不花模型钱）
-locust -f eval/load/locustfile.py --host http://localhost:8000
-```
-
-不配置 API 也可以完整验证工程链路：
-
-```bash
-make test        # 271 个离线测试：守卫/只读层/评测打分/图编排/服务端（MockLLM）
-make smoke-gold  # 评测基建自检：gold SQL 离线回放，必须 20/20
-```
-
-## 安全设计（纵深防御）
-
-| 层 | 机制 |
+| 风险 | 措施 |
 |---|---|
-| 第一道：SQL 守卫 | sqlglot AST 校验——只放行单条 SELECT、表白名单、拒绝系统表/跨库/表值函数，强制注入 `LIMIT` |
-| 第二道：数据库层 | `mode=ro` 只读打开 + `PRAGMA query_only` + sqlite authorizer 三重锁死写操作 |
-| 运行时 | 单查询超时中断、行数截断、单次提问 token/金额预算熔断 |
+| 模型写出修改数据的 SQL | 语法树只放行单条 SELECT；SQLite 以只读 URI + `query_only` + authorizer 打开；服务器引擎用只读会话与只读账号 |
+| 访问未授权的表 | 表白名单同时作用于提示词中的 schema、守卫和 API，模型看不到也查不了 |
+| 模型生成的画图代码 | 不在主进程执行：宿主机有 Docker 时用断网容器（内存 / CPU / 进程数限额），否则用带资源限额的独立子进程；产物只接受普通 PNG 文件，不跟随符号链接 |
+| 回答编造数字 | 数字溯源校验，重写一次仍不合格则降级为原始结果 |
+| 成本失控 | 单次提问的 token 与金额预算熔断，修复轮次上限 |
 
-## 评测
+## 局限
 
-- `eval/cases/smoke.jsonl`：20 条冒烟题（单表/连接/金额/多跳），每条带人工核验的 gold SQL
-- **公开基准**：`make bird-prepare` / `make bird` 一键接入 BIRD/Spider dev（见 [docs/benchmarks.md](docs/benchmarks.md)），子集固定 seed 抽样、gold 逐条执行校验
-- 指标：**执行准确率 EX**（与 BIRD/Spider 口径一致：比结果集不比 SQL 文本），
-  `--repeats 3` 重复跑分汇总为 **Wilson 95% 置信区间**；配置间对比用 **McNemar 配对检验**（`make report`）
-- 质量门禁：gold 必须过守卫、可执行、非空、自评满分（`tests/test_smoke_gold.py` 强制）；
-  `--gold-replay` 离线回放不到 100% 即判定评测基建有 bug
-- CI：每次提交自动跑全部离线测试 + 评测自检
+- **业务评测集由模板生成。** 236 道题由模板参数展开，去掉参数后只有 32 种 SQL 结构；
+  holdout 按题随机切分，其中 69/71 题的 SQL 结构在 dev 中出现过。因此 holdout 能说明
+  结果不依赖具体参数，但不能证明对新题型的泛化。按结构切分的评测集尚未构建。
+- **BIRD 只跑了 150 题子集、单次、单一模型**，区间较宽，不能与官方排行榜直接比较。
+- **只支持单轮提问。** "那上个月呢"这类依赖上文的追问目前会被当作独立问题处理。
+- **访问控制是演示级别**：全站访问口令 + 表级白名单，不是多租户鉴权。
 
-## 可观测性
+## 更多文档
 
-在 [Langfuse Cloud](https://cloud.langfuse.com)（免费版即可）建项目拿到两个 key 填进 `.env`，
-再 `uv sync --extra trace`——之后每次提问的完整链路（每个节点的 SQL、错误分类、token、
-成本、延迟）都能在 Langfuse 网页上图形化查看，不需要自己写任何前端。
-未配置时追踪完全关闭，零开销。
+- [docs/DEPLOY.md](docs/DEPLOY.md)：服务器部署、nginx 反代、访问口令
+- [docs/benchmarks.md](docs/benchmarks.md)：BIRD / Spider 接入与统计口径
+- [docs/badcases.md](docs/badcases.md)：失败案例逐条复盘
+- [docs/frontend-spec.md](docs/frontend-spec.md)：SSE 事件与 API 约定
 
-## 文档
-
-- [部署指南](docs/DEPLOY.md)：服务器部署（docker compose、nginx SSE 反代、访问口令、安全边界）
-- [评测基准](docs/benchmarks.md)：BIRD/Spider 接入方法与统计口径
-- [失败案例复盘](docs/badcases.md)：逐条根因验证与修复前后对比
-- [前端契约](docs/frontend-spec.md)：SSE 事件与 API 约定
+其他入口：`uv sync --extra mcp && uv run deepquery-mcp` 启动 MCP server，可接入 Claude Desktop 等客户端；
+`deepquery remember "销售额指已完成订单的成交金额"` 为当前用户保存业务口径，后续提问自动带上。

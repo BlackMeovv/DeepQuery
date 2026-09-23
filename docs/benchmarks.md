@@ -39,15 +39,22 @@ make bird ROOT=~/data/bird_dev LABEL=schema-rag
 ## 4. 汇总消融表
 
 ```bash
-make report FILES="eval/results/bird-dev-baseline-*.json eval/results/bird-dev-schema-rag-*.json"
-# 或加配对显著性检验：
-uv run python -m deepquery.evalkit.report <baseline.json> <optimized.json> --mcnemar
+make report FILES="eval/results/<基线>.json eval/results/<改动后>.json"
 ```
 
-输出 markdown 表：每行一个配置，EX 带置信区间 + 成本 + 延迟。
-McNemar 检验回答"这次提升是真的还是抖动"。
+输出 markdown 表：每行一个配置，EX 带置信区间 + 设计效应 + 成本 + 延迟；
+并对前两个配置做按题配对比较（平均差区间 + 符号检验），回答"这次提升是真的还是抖动"。
+
+统计口径：
+
+- **区间按题目聚类校正。** `--repeats 3` 时同一题的三次结果高度相关，不能当成 3 倍的
+  独立样本。先估计设计效应 deff（题目成功率的实测方差 / 独立假设下的二项方差），
+  用有效样本量 = 总试验数 / deff 计算 Wilson 区间。repeats=1 时退化为普通 Wilson 区间。
+- **配置对比按题配对。** 逐题取两个配置的成功率之差，报告平均差的 95% 区间，并对
+  "变好/变差"的题数做精确符号检验（repeats=1 时即精确 McNemar）。不先把每题的多次
+  结果按多数票压成对错——那会丢掉部分改进和部分退步。
 
 ## 约定
 
 - 调 prompt / 检索只看 dev 子集；最终对外报告的数字用另抽的 held-out 子集复核（换个 seed 再 prepare 一份，标记为 holdout，平时绝不跑）。
-- 报告 JSON 全部留档在 `eval/results/`（已 gitignore，重要结果手动挑进 git 或写进 report.md）。
+- 报告 JSON 全部留档在 `eval/results/` 并纳入版本库：README 与复盘里的每个数字都能从这里复算。

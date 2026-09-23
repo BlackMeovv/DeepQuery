@@ -8,8 +8,8 @@
 设计要点：
 - --gold-replay 用 MockLLM 把每题 gold SQL 原样喂给 agent，验证评测基建本身，
   跑不到 100% 说明 harness 有 bug（离线、零成本）。
-- --repeats N 重复整套评测 N 次，汇总为合并试验的 Wilson 95% 置信区间——
-  报"58.0% [51.2, 64.5]"而不是一个孤立数字。
+- --repeats N 重复整套评测 N 次，汇总为 95% 置信区间——报"58.0% [51.2, 64.5]"
+  而不是一个孤立数字。同一题的多次重复不独立，区间按题目聚类估设计效应校正。
 - 每条 case 可带 "db" 字段（相对 --db-root 或 cases 文件目录），支持 BIRD/Spider
   这类一题一库的基准；不带则用 .env 的 DB_PATH。
 """
@@ -29,7 +29,7 @@ from ..config import get_settings
 from ..llm import LLMClient, MockLLM
 from ..tools.database import ReadOnlyDatabase
 from .scorer import execution_match, tables_in_sql
-from .stats import wilson_interval
+from .stats import clustered_interval, wilson_interval
 
 console = Console()
 
@@ -167,6 +167,8 @@ def run_eval(
     total_trials = sum(len(e["ex_by_repeat"]) for e in per_case.values())
     pooled = sum(sum(e["ex_by_repeat"]) for e in per_case.values())
     low, high = wilson_interval(pooled, total_trials)
+    # 重复评测时同一题的多次结果不独立：主口径用题目聚类校正后的区间
+    clustered = clustered_interval([e["ex_by_repeat"] for e in per_case.values()])
 
     results = []
     for case in cases:
@@ -200,6 +202,12 @@ def run_eval(
         "trials": total_trials,
         "ex_matched": pooled,
         "ex_accuracy": round(pooled / total_trials, 4) if total_trials else 0.0,
+        # 主口径：按题目聚类校正（repeats=1 时与朴素 Wilson 相同）
+        "ci_low": round(clustered.low, 4),
+        "ci_high": round(clustered.high, 4),
+        "design_effect": round(clustered.design_effect, 3),
+        "n_effective": round(clustered.n_effective, 1),
+        # 朴素口径（把每次重复当独立试验）：仅作对照保留，会低估不确定度
         "wilson_low": round(low, 4),
         "wilson_high": round(high, 4),
         "per_repeat_accuracy": per_repeat_accuracy,
@@ -234,9 +242,14 @@ def run_eval(
     table = Table(title=f"EX 结果 · {summary['label']}")
     table.add_column("指标")
     table.add_column("值", justify="right")
-    ci = f"{summary['ex_accuracy']:.1%} [{low:.1%}, {high:.1%}]"
+    ci = f"{summary['ex_accuracy']:.1%} [{clustered.low:.1%}, {clustered.high:.1%}]"
     table.add_row("执行准确率 EX（95% CI）", f"{pooled}/{total_trials} = {ci}")
     if repeats > 1:
+        table.add_row(
+            "区间口径",
+            f"按题聚类校正：设计效应 {clustered.design_effect:.2f}，"
+            f"有效样本 {clustered.n_effective:.0f}（朴素口径 [{low:.1%}, {high:.1%}] 偏窄）",
+        )
         table.add_row("各次重复", ", ".join(f"{a:.1%}" for a in per_repeat_accuracy))
     if summary["avg_table_recall"] is not None:
         table.add_row("选表召回率（Schema RAG）", f"{summary['avg_table_recall']:.1%}")
