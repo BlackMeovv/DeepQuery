@@ -168,6 +168,16 @@ def extract_clarification(text: str) -> dict | None:
     return None
 
 
+# "问口径 / 表结构"的字面信号。不查数据直接回答，只在问题里出现这类说法时才接受：
+# 否则"销售额最高的品类是哪个"这种数据问题，模型偷懒报个品类名（不带数字）也能通过数字校验
+_META_CUE = re.compile(
+    r"口径|定义|含义|意思|区别|怎么算|如何算|怎么计算|如何计算|计算方[法式]|算法|公式|怎么来|怎么得|"
+    r"这么算|怎么查|如何查|查询逻辑|哪些表|哪张表|哪个表|什么表|字段|表结构|数据结构|schema|sql|"
+    r"依据|来源|出处|哪来|从哪",
+    re.IGNORECASE,
+)
+
+
 def extract_meta_answer(text: str) -> str | None:
     """解析模型的 ```answer 代码块（问口径 / 表结构时不查数据、直接回答）。
 
@@ -640,16 +650,22 @@ class DeepQuery:
             meta = extract_meta_answer(reply.text) if state.get("interactive") and round_ == 0 else None
             if meta is None:
                 return {"candidate_sql": extract_sql(reply.text), "thought": thought}
-            # 口头回答只能讲口径和结构：出现的数字必须能在 schema / 口径 / 对话上下文里找到，
-            # 否则就是在没查数据的情况下报数——退回去让模型写 SQL 查
-            sources = "\n".join((state["schema_context"], state.get("conversation", "")))
-            violations = check_answer(meta, None, state["question"], sources)
-            self._trace(state).span("meta_answer_check", metadata={"violations": violations})
-            if not violations:
-                return {"status": "ok_meta", "answer": meta, "thought": thought}
+            # 不查数据的回答有两道检查，不过就退回去让模型写 SQL 查：
+            # 1. 问题本身得是在问口径 / 表结构，数据问题不能凭表结构作答；
+            # 2. 出现的数字必须能在 schema / 口径 / 对话上下文里找到，否则就是没查数据却在报数
+            if not _META_CUE.search(state["question"]):
+                nudge = prompts.META_NEEDS_DATA
+                self._trace(state).span("meta_answer_check", metadata={"rejected": "needs_data"})
+            else:
+                sources = "\n".join((state["schema_context"], state.get("conversation", "")))
+                violations = check_answer(meta, None, state["question"], sources)
+                self._trace(state).span("meta_answer_check", metadata={"violations": violations})
+                if not violations:
+                    return {"status": "ok_meta", "answer": meta, "thought": thought}
+                nudge = prompts.META_NUDGE.format(violations="、".join(violations))
             messages = messages + [
                 {"role": "assistant", "content": reply.text},
-                {"role": "user", "content": prompts.META_NUDGE.format(violations="、".join(violations))},
+                {"role": "user", "content": nudge},
             ]
         return {"candidate_sql": extract_sql(reply.text), "thought": thought}
 

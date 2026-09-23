@@ -81,7 +81,8 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
   "clarify": true,      // 允许 Agent 在口径不明或缺数据时先反问；用户回答确认后的追问传 false，避免来回拉扯
   "code": null,         // 开启访问口令时必填
   // 同一会话里之前的几轮（旧的在前，最多 3 轮），让 Agent 听懂"那按州呢""这些用了哪些字段"这类追问。
-  // 只拼进提示词供模型参考、从不执行；缓存按它区分。question ≤500 字、sql ≤4000 字、answer ≤600 字
+  // 只拼进提示词供模型参考、从不执行；缓存按它区分。question ≤500 字、sql ≤4000 字、answer ≤600 字。
+  // sql 建议传上一轮 final 里的 predicted_sql（模型原始 SQL）：守卫改写版末尾的 LIMIT 会被模型照抄
   "history": [ { "question": "延迟送达的订单评分低多少？", "sql": "SELECT …", "answer": "低 2.02 分。" } ]
 }
 ```

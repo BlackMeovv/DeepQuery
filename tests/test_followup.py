@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from deepquery.agent import DeepQuery
 from deepquery.agent import prompts
-from deepquery.agent.graph import extract_meta_answer
+from deepquery.agent.graph import _META_CUE, extract_meta_answer
 from deepquery.llm import MockLLM
 from deepquery.server import create_app
 
@@ -38,6 +38,20 @@ class TestExtractMetaAnswer:
         assert extract_meta_answer("```answer\n\n```") is None
 
 
+class TestMetaCue:
+    """只有在问口径 / 表结构时，才允许不查数据直接回答。"""
+
+    def test_meta_questions(self):
+        for q in ("各指标使用了哪些表和字段？", "平均送达天数是怎么算的？", "GMV 和销售额有什么区别？",
+                  "这个数是从哪来的？", "延迟送达的口径是什么？", "上一轮的 SQL 是什么意思？"):
+            assert _META_CUE.search(q), q
+
+    def test_data_questions(self):
+        for q in ("销售额最高的品类是哪个？", "那按州呢？", "各城市有多少客户？",
+                  "延迟送达的订单评分低多少？", "哪个卖家最好？"):
+            assert not _META_CUE.search(q), q
+
+
 class TestMetaQuestion:
     def test_answered_from_schema_without_query(self, settings, db):
         llm = MockLLM([META_REPLY])
@@ -49,9 +63,9 @@ class TestMetaQuestion:
         assert "不用查数据的问题" in llm.calls[0][0]["content"]
 
     def test_unsourced_number_falls_back_to_sql(self, settings, db):
-        # 没查数据却报了数：退回去写 SQL，结果以查询为准
+        # 问的是口径，口头回答里却报了一个数：没查数据就不能报数，退回去写 SQL
         llm = MockLLM([META_WITH_NUMBER, SQL_REPLY, ANSWER_REPLY])
-        outcome = DeepQuery(settings, db, llm).ask("上海有多少客户？", interactive=True)
+        outcome = DeepQuery(settings, db, llm).ask("客户数的口径是什么？", interactive=True)
         assert outcome.status == "ok" and outcome.final_sql
         nudge = llm.calls[1][-1]["content"]
         assert "98765" in nudge and "写 SQL" in nudge
@@ -62,6 +76,14 @@ class TestMetaQuestion:
         agent = DeepQuery(settings, db, MockLLM([reply]))
         outcome = agent.ask("上一轮是怎么查的？", interactive=True, history=[PREV_TURN])
         assert outcome.status == "ok_meta"
+
+    def test_data_question_cannot_skip_the_query(self, settings, db):
+        # 数据问题（问题里没有"口径 / 字段 / 怎么算"之类的说法）：不带数字的口头回答也不接受
+        lazy = "看表结构就知道。\n```answer\n上海的客户最多。\n```"
+        llm = MockLLM([lazy, SQL_REPLY, ANSWER_REPLY])
+        outcome = DeepQuery(settings, db, llm).ask("哪个城市的客户最多？", interactive=True)
+        assert outcome.status == "ok" and outcome.final_sql
+        assert "要查询数据才能回答" in llm.calls[1][-1]["content"]
 
     def test_eval_mode_never_uses_meta_rules(self, settings, db):
         llm = MockLLM([SQL_REPLY])

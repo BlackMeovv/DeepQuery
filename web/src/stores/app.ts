@@ -37,6 +37,7 @@ export interface AiMsg {
   status: MsgStatus;
   steps: Step[];
   sql?: string | null;
+  rawSql?: string | null; // 模型原始 SQL（没有守卫注入的 LIMIT），追问时作为上下文
   answer?: string;
   blockedText?: string;
   columns?: string[];
@@ -84,7 +85,8 @@ function historyOf(msgs: Msg[]): HistoryTurn[] {
     if (!m.sql && !m.answer) continue;
     turns.push({
       question: m.q.slice(0, 500),
-      sql: (m.sql || "").slice(0, 4000),
+      // 用模型原始 SQL：守卫改写版末尾的 LIMIT 200 会被模型照抄，盖过"名单默认前 10"
+      sql: (m.rawSql || m.sql || "").slice(0, 4000),
       answer: (m.answer || "").slice(0, 600),
     });
   }
@@ -294,6 +296,7 @@ export const useAppStore = defineStore("app", {
             clarification: needsClarify ? p.clarification : null,
             meta: p.status === "ok_meta",
             sql: p.sql,
+            rawSql: p.predicted_sql,
             answer: p.hallucination_blocked || needsClarify ? undefined : p.answer,
             blockedText: p.hallucination_blocked ? p.answer : undefined,
             columns: p.columns,

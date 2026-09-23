@@ -216,6 +216,7 @@ export function askStream(req: AskRequest, callbacks: AskCallbacks, user = userI
         callbacks.onError(
           resp.status === 401 ? "访问口令错误或已失效，请刷新页面重新输入"
             : resp.status === 422 ? "问题太长了，请精简到 2000 字以内"
+            : resp.status >= 500 ? `服务暂时不可用（HTTP ${resp.status}，可能正在重启），稍后点「重跑」再试`
             : `服务拒绝了这次请求（HTTP ${resp.status}）`,
         );
         return;
