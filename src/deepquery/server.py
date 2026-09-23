@@ -50,6 +50,9 @@ COST = Counter("deepquery_llm_cost_total", "累计 LLM 成本（按 .env 单价�
 _CHART_NAME = re.compile(r"^chart-[0-9a-f]{12}\.png$")
 MAX_NOTES_PER_USER = 50  # 单个访客的记忆条数上限，防止公网演示时记忆库被灌满
 MAX_NOTES_TOTAL = 20_000  # 全库上限：访客 ID 由客户端生成，只按访客限制挡不住换 ID 刷库
+# SSE 心跳间隔（秒）：模型写 SQL、思考回答时可能十几秒没有任何输出，
+# 反向代理 / 负载均衡 / CDN 会按空闲超时掐断连接；发一行注释保活（浏览器会忽略注释行）
+SSE_HEARTBEAT_SECONDS = 10.0
 
 
 def memory_scope(agent: DeepQuery, user: str) -> str:
@@ -391,7 +394,11 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             outcome: RunOutcome | None = None
             try:
                 while True:
-                    kind, item = await q.get()
+                    try:
+                        kind, item = await asyncio.wait_for(q.get(), timeout=SSE_HEARTBEAT_SECONDS)
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"
+                        continue
                     if kind == "end":
                         break
                     if kind == "error":

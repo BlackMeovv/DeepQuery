@@ -292,7 +292,7 @@ export const useAppStore = defineStore("app", {
         onError: () => {
           patch({ status: "failed" });
           const m = this.msgs.find((x) => x.id === aiId) as AiMsg;
-          m.steps.push({ label: "连接中断", state: "error", err: "SSE 连接中断" });
+          m.steps.push({ label: "连接中断", state: "error", err: "与服务器的连接断开了（网络波动或代理超时），点「重跑」再试一次" });
           this.running = false;
           this.stream = null;
           this.persist();

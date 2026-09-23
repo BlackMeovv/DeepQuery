@@ -236,3 +236,21 @@ class TestSharedStateSafety:
         for _ in range(5):
             agent.maybe_refresh_schema()
         assert counting.checks == 1
+
+
+class TestHeartbeat:
+    def test_silent_stretches_send_keepalive_comments(self, settings, db, monkeypatch):
+        import deepquery.server as server_mod
+
+        class SlowSqlLLM(SlowLLM):
+            def chat(self, messages, meter, tag="", on_delta=None):
+                if tag == "generate_sql":
+                    time.sleep(0.4)  # 模型写 SQL 期间没有任何输出
+                return super().chat(messages, meter, tag=tag, on_delta=on_delta)
+
+        monkeypatch.setattr(server_mod, "SSE_HEARTBEAT_SECONDS", 0.05)
+        app = create_app(agent=DeepQuery(settings, db, SlowSqlLLM(delay=0)), settings=settings)
+        with TestClient(app) as c:
+            text = c.get("/api/ask", params={"question": "订单数？"}).text
+        assert ": ping" in text  # 保活注释行（浏览器的 EventSource 会忽略）
+        assert _final(text)["status"] == "ok"  # 不影响正常的事件与最终结果

@@ -1,6 +1,7 @@
 """沙箱执行器测试（SubprocessSandbox，离线）。"""
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -116,7 +117,11 @@ class TestPrivilegeDrop:
         assert result.ok
         forked = int(open(result.chart_path, "rb").read()[8:])
         assert forked < 100  # 进程数上限生效
-        assert _sandbox_processes() == []  # 后台睡着的子进程都被清理了
+        # 后台睡着的子进程都被清理了：SIGKILL 是异步送达的，给内核一点时间把它们变成僵尸
+        deadline = time.time() + 3
+        while _sandbox_processes() and time.time() < deadline:
+            time.sleep(0.05)
+        assert _sandbox_processes() == []
 
 
 def test_old_charts_are_pruned(tmp_path):

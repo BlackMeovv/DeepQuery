@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { prettySql, tokenizeSql } from "../lib/sql";
 import { cleanAnswer } from "../lib/text";
 import { nextStepOf, pillOf, useAppStore, type AiMsg } from "../stores/app";
@@ -9,15 +9,8 @@ import ResultTable from "./ResultTable.vue";
 const props = defineProps<{ msg: AiMsg }>();
 const store = useAppStore();
 
-// 运行过程在消息内原地下拉展开；运行中自动展开、结束后自动收起
-const open = ref(props.msg.status === "running");
-watch(
-  () => props.msg.status,
-  (now, prev) => {
-    if (now === "running") open.value = true;
-    else if (prev === "running") open.value = false;
-  },
-);
+// 运行过程默认收起：运行中只显示"正在…"的状态条，点击才在消息内展开步骤
+const open = ref(false);
 
 const pill = computed(() => pillOf(props.msg.status));
 
