@@ -4,6 +4,8 @@
     generate_sql → execute →（成功）→ answer
                           →（失败且还有额度）→ repair → execute ...
                           →（轮次/预算耗尽）→ fallback
+    generate_sql →（交互模式：需要确认）→ clarify
+                 →（交互模式：问口径/表结构，不用查数据）→ explain
 
 内层（repair 节点内部是手写的 Reason-Act-Observe 循环）：
     观察全部历史尝试与结构化错误 → 生成修正 SQL
@@ -55,7 +57,9 @@ class Attempt:
 @dataclass
 class RunOutcome:
     question: str
-    status: str  # ok / ok_empty / failed / budget_exceeded / needs_clarification
+    # ok / ok_empty / ok_meta（问口径、表结构，依据 schema 直接回答、没有查数据）
+    # / failed / budget_exceeded / needs_clarification
+    status: str
     answer: str = ""
     final_sql: str | None = None  # 实际执行的 SQL（守卫改写后，含注入的 LIMIT）
     predicted_sql: str | None = None  # 模型原始 SQL（评测打分用）
@@ -73,7 +77,7 @@ class RunOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return self.status in ("ok", "ok_empty")
+        return self.status in ("ok", "ok_empty", "ok_meta")
 
 
 class _State(TypedDict, total=False):
@@ -99,6 +103,7 @@ class _State(TypedDict, total=False):
     allow_clarify: bool  # 交互模式：允许模型先向用户确认（评测时关闭）
     interactive: bool  # 在线问答：结果给人看（名单默认前 10、匿名 ID 带辨认列）；评测时关闭
     clarification: dict  # 模型提出的澄清问题
+    conversation: str  # 同一会话里之前几轮的问题 / SQL / 回答（追问时理解指代用；评测为空）
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -161,6 +166,18 @@ def extract_clarification(text: str) -> dict | None:
         if question:
             return {"question": question[:120], "term": term[:30], "options": options}
     return None
+
+
+def extract_meta_answer(text: str) -> str | None:
+    """解析模型的 ```answer 代码块（问口径 / 表结构时不查数据、直接回答）。
+
+    同时给了 SQL 的一律按查数据处理：能查就查，结果比口头解释可靠。
+    """
+    blocks = [(lang.lower(), body.strip()) for lang, body in _CODE_BLOCK.findall(text or "")]
+    if any(lang in ("sql", "sqlite") and body for lang, body in blocks):
+        return None
+    body = next((body for lang, body in blocks if lang == "answer" and body), None)
+    return plain_answer(body) if body else None
 
 
 def plain_answer(text: str) -> str:
@@ -362,14 +379,16 @@ class DeepQuery:
         user_id: str = "default",
         allow_clarify: bool = False,
         interactive: bool = False,
+        history: list[dict] | None = None,
     ) -> RunOutcome:
         """回答一个自然语言问题。generate_answer=False 时跳过总结节点（评测省成本）；
         generate_chart=True 时对成功结果生成图表（模型写代码 → 沙箱执行）；
         allow_clarify=True 时问题有歧义或数据缺失会返回 needs_clarification（交互场景用，
-        评测保持关闭，提示词与历史评测一致）。"""
+        评测保持关闭，提示词与历史评测一致）。
+        history：同一会话之前几轮的 [{question, sql, answer}]（旧的在前），支持"那…呢"这类追问。"""
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id, allow_clarify, interactive
+            question, generate_answer, generate_chart, user_id, allow_clarify, interactive, history
         )
         try:
             final: dict = self._graph.invoke(state, config=self._run_config())
@@ -389,6 +408,7 @@ class DeepQuery:
         allow_clarify: bool = False,
         handle: RunHandle | None = None,
         interactive: bool = False,
+        history: list[dict] | None = None,
     ):
         """逐节点流式执行（服务端 SSE 用）。
 
@@ -399,7 +419,7 @@ class DeepQuery:
         """
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id, allow_clarify, interactive
+            question, generate_answer, generate_chart, user_id, allow_clarify, interactive, history
         )
         if handle is not None:
             meter.cancel_event = handle.cancelled
@@ -434,6 +454,7 @@ class DeepQuery:
         user_id: str = "default",
         allow_clarify: bool = False,
         interactive: bool = False,
+        history: list[dict] | None = None,
     ):
         self.maybe_refresh_schema()  # 建/改表后无需重启即生效（CLI/MCP/服务共用此入口）
         snap = self._snap  # 本次运行全程只用这一份快照
@@ -444,8 +465,11 @@ class DeepQuery:
             max_cost=self.settings.agent_max_cost_per_run,
         )
         trace = self.tracer.start_run(question)
+        # 追问常常省略主语（"那按月呢"）：检索口径、例句和记忆时带上上一轮的问题
+        turns = [t for t in (history or []) if t.get("question")]
+        lookup = f"{turns[-1]['question']} {question}" if turns else question
         schema_context, selected_tables, context_used = self._build_schema_context(
-            question, snap, user_id=user_id
+            lookup, snap, user_id=user_id
         )
         # context_used 含用户私有记忆原文：只能随本次运行传递，绝不能挂在共享的
         # agent 实例上——并发请求会互相覆盖，把 A 的记忆吐给 B 并写进缓存
@@ -462,6 +486,7 @@ class DeepQuery:
             "allowed_tables": snap.allowed_tables,
             "allow_clarify": allow_clarify,
             "interactive": interactive,
+            "conversation": prompts.format_history(turns),
         }
         return state, meter, trace, selected_tables, context_used
 
@@ -525,16 +550,13 @@ class DeepQuery:
         g.add_node("summarize", self._node_answer)
         g.add_node("fallback", self._node_fallback)
         g.add_node("clarify", self._node_clarify)
+        g.add_node("explain", self._node_explain)
 
         g.set_entry_point("generate_sql")
         g.add_conditional_edges(
             "generate_sql",
-            lambda s: (
-                "clarify"
-                if s.get("status") == "needs_clarification"
-                else "fallback" if s.get("status") in ("budget_exceeded", "failed") else "execute"
-            ),
-            {"execute": "execute", "fallback": "fallback", "clarify": "clarify"},
+            self._route_after_generate,
+            {"execute": "execute", "fallback": "fallback", "clarify": "clarify", "explain": "explain"},
         )
         g.add_conditional_edges(
             "execute",
@@ -550,6 +572,7 @@ class DeepQuery:
         g.add_edge("summarize", END)
         g.add_edge("fallback", END)
         g.add_edge("clarify", END)
+        g.add_edge("explain", END)
         return g.compile()
 
     # ---------- nodes ----------
@@ -573,40 +596,81 @@ class DeepQuery:
             system += prompts.INTERACTIVE_RULES
         return system
 
+    def _sql_user(self, state: _State) -> str:
+        """写 SQL 的用户消息：schema 上下文 +（有的话）对话上下文 + 本轮问题。"""
+        if state.get("conversation"):
+            return prompts.SQL_USER_WITH_HISTORY_TEMPLATE.format(
+                schema=state["schema_context"],
+                history=state["conversation"],
+                question=state["question"],
+            )
+        return prompts.SQL_USER_TEMPLATE.format(
+            schema=state["schema_context"], question=state["question"]
+        )
+
     def _node_generate_sql(self, state: _State) -> _State:
         system = self._sql_system(state)
         if state.get("allow_clarify"):
             system += prompts.CLARIFY_RULES
+        if state.get("interactive"):
+            system += prompts.META_RULES
         messages = [
             {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": prompts.SQL_USER_TEMPLATE.format(
-                    schema=state["schema_context"], question=state["question"]
-                ),
-            },
+            {"role": "user", "content": self._sql_user(state)},
         ]
-        try:
-            reply = self.llm.chat(messages, state["meter"], tag="generate_sql")
-        except BudgetExceeded:
-            return {"status": "budget_exceeded", "give_up_reason": "预算超限"}
-        except LLMError as e:
-            return {"status": "failed", "give_up_reason": f"LLM 调用失败: {e}"}
-        self._record_generation(state, "generate_sql", messages, reply)
-        if state.get("allow_clarify"):
-            clarification = extract_clarification(reply.text)
-            if clarification:
-                # 有歧义或数据缺失：不猜，把问题交还给用户
-                return {
-                    "status": "needs_clarification",
-                    "clarification": clarification,
-                    "answer": clarification["question"],
-                    "thought": extract_thought(reply.text),
-                }
-        return {"candidate_sql": extract_sql(reply.text), "thought": extract_thought(reply.text)}
+        for round_ in range(2):  # 第二轮只在"口头回答里出现了无出处的数字"时发生
+            try:
+                reply = self.llm.chat(messages, state["meter"], tag="generate_sql")
+            except BudgetExceeded:
+                return {"status": "budget_exceeded", "give_up_reason": "预算超限"}
+            except LLMError as e:
+                return {"status": "failed", "give_up_reason": f"LLM 调用失败: {e}"}
+            self._record_generation(state, "generate_sql", messages, reply)
+            thought = extract_thought(reply.text)
+            if state.get("allow_clarify"):
+                clarification = extract_clarification(reply.text)
+                if clarification:
+                    # 有歧义或数据缺失：不猜，把问题交还给用户
+                    return {
+                        "status": "needs_clarification",
+                        "clarification": clarification,
+                        "answer": clarification["question"],
+                        "thought": thought,
+                    }
+            meta = extract_meta_answer(reply.text) if state.get("interactive") and round_ == 0 else None
+            if meta is None:
+                return {"candidate_sql": extract_sql(reply.text), "thought": thought}
+            # 口头回答只能讲口径和结构：出现的数字必须能在 schema / 口径 / 对话上下文里找到，
+            # 否则就是在没查数据的情况下报数——退回去让模型写 SQL 查
+            sources = "\n".join((state["schema_context"], state.get("conversation", "")))
+            violations = check_answer(meta, None, state["question"], sources)
+            self._trace(state).span("meta_answer_check", metadata={"violations": violations})
+            if not violations:
+                return {"status": "ok_meta", "answer": meta, "thought": thought}
+            messages = messages + [
+                {"role": "assistant", "content": reply.text},
+                {"role": "user", "content": prompts.META_NUDGE.format(violations="、".join(violations))},
+            ]
+        return {"candidate_sql": extract_sql(reply.text), "thought": thought}
+
+    @staticmethod
+    def _route_after_generate(state: _State) -> str:
+        status = state.get("status")
+        if status == "needs_clarification":
+            return "clarify"
+        if status == "ok_meta":
+            return "explain"
+        if status in ("budget_exceeded", "failed"):
+            return "fallback"
+        return "execute"
 
     def _node_clarify(self, state: _State) -> _State:
         self._trace(state).span("clarify", metadata=state.get("clarification") or {})
+        return {}
+
+    def _node_explain(self, state: _State) -> _State:
+        """问口径 / 表结构：回答已在 generate_sql 里给出，这里只留一条追踪记录。"""
+        self._trace(state).span("explain", metadata={"answer_chars": len(state.get("answer", ""))})
         return {}
 
     def _node_execute(self, state: _State) -> _State:
@@ -670,12 +734,7 @@ class DeepQuery:
         history = "\n\n".join(a.describe(i + 1) for i, a in enumerate(attempts))
         messages = [
             {"role": "system", "content": self._sql_system(state)},
-            {
-                "role": "user",
-                "content": prompts.SQL_USER_TEMPLATE.format(
-                    schema=state["schema_context"], question=state["question"]
-                ),
-            },
+            {"role": "user", "content": self._sql_user(state)},
             {
                 "role": "user",
                 "content": prompts.REPAIR_USER_TEMPLATE.format(

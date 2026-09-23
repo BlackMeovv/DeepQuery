@@ -65,7 +65,9 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         lines += ["", "在问题后补充说明重新提问，例如：", f'  deepquery ask "{args.question}（补充说明：{c["options"][0] if c["options"] else "……"}）"']
         console.print(Panel(Text("\n".join(lines)), title="需要向你确认", border_style="yellow"))
     elif outcome.answer:
-        console.print(Panel(Text(outcome.answer), title="回答", border_style="green"))
+        # 问口径 / 表结构时没有查数据，标题写明依据，不和查询结果混淆
+        title = "回答（依据表结构与业务口径，未查询数据）" if outcome.status == "ok_meta" else "回答"
+        console.print(Panel(Text(outcome.answer), title=title, border_style="green"))
     if outcome.chart_path:
         console.print(f"图表已生成: [cyan]{escape(outcome.chart_path)}[/cyan]")
     elif args.chart and outcome.chart_error:

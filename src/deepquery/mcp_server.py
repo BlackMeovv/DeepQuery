@@ -37,7 +37,10 @@ def _get_agent():
 
 
 def ask_data(question: str, user: str = "default") -> dict[str, Any]:
-    """用自然语言查询业务数据库。返回回答、SQL 与结果预览。"""
+    """用自然语言查询业务数据库。返回回答、SQL 与结果预览。
+
+    status=ok_meta 表示问的是口径或表结构，回答依据 schema 与业务字典给出，没有查询数据（sql 为空）。
+    """
     outcome = _get_agent().ask(question, user_id=user, allow_clarify=True, interactive=True)
     return {
         "status": outcome.status,

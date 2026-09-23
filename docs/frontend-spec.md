@@ -10,7 +10,8 @@
   - **Arco Design Vue**（字节开源）——本身就是内部数据平台风格，与后端现用的 #165dff 主色一致，最贴合"生产工具"观感
   - **Element Plus**——国内使用最广、生态最成熟
 - SQL 高亮：`shiki` 或 `highlight.js`；图表（可选进阶）：`echarts` 直接在前端渲染查询结果
-- **不需要任何 SSE 库**：原生 `EventSource` 即可（参考内置页的实现）
+- **不需要任何 SSE 库**：`fetch` + `ReadableStream` 自己按空行切事件即可（见 `web/src/lib/api.ts` 的 `askStream`）；
+  只用不带上下文的 GET 版接口时，原生 `EventSource` 也行（参考内置页的实现）
 
 ## 二、开发联调（二选一）
 
@@ -68,29 +69,48 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 - `POST /api/memory`，body `{ "note": "…", "user": "default" }` → `{ "id": 2 }`（note 1-500 字）
 - `DELETE /api/memory/{id}?user=default` → `{ "ok": true }`（404=不存在）
 
-### 4. `GET /api/ask?question=…&chart=0|1&user=default&clarify=1` — 核心接口，SSE 流
+### 4. `POST /api/ask` — 核心接口，SSE 流
 
-`clarify`（默认 1）允许 Agent 在口径不明或缺数据时先反问；用户回答确认后的追问传 `clarify=0`，避免来回拉扯。
-`fresh=1` 跳过缓存强制重跑。
+请求体（JSON）：
+```json
+{
+  "question": "那按州呢？",
+  "chart": false,
+  "user": "default",
+  "fresh": false,       // true=跳过缓存强制重跑
+  "clarify": true,      // 允许 Agent 在口径不明或缺数据时先反问；用户回答确认后的追问传 false，避免来回拉扯
+  "code": null,         // 开启访问口令时必填
+  // 同一会话里之前的几轮（旧的在前，最多 3 轮），让 Agent 听懂"那按州呢""这些用了哪些字段"这类追问。
+  // 只拼进提示词供模型参考、从不执行；缓存按它区分。question ≤500 字、sql ≤4000 字、answer ≤600 字
+  "history": [ { "question": "延迟送达的订单评分低多少？", "sql": "SELECT …", "answer": "低 2.02 分。" } ]
+}
+```
+用 POST 而不是 GET：带上之前几轮的 SQL 后，URL 会超过 nginx 默认 8KB 的请求行上限；口令也不会进访问日志。
+`GET /api/ask?question=…&chart=0|1&user=default&clarify=1&fresh=1&code=…` 仍然保留（不带对话上下文，内置单文件页在用）。
 
-`Content-Type: text/event-stream`。用 `EventSource` 监听两类事件：
+`Content-Type: text/event-stream`。响应里有三类事件（另有 `: ping` 注释行做心跳，忽略即可）：
 
 **`event: node`**（每完成一个节点推一条，驱动右栏运行过程）：
 ```json
 {
-  "node": "generate_sql | execute | repair | chart | summarize | fallback | clarify",
+  "node": "generate_sql | execute | repair | chart | summarize | fallback | clarify | explain",
   "label": "生成 SQL",
   "thought": "模型的一句话思路（generate_sql/repair 才有，可无）",
+  "sql": "生成的 SQL（generate_sql/repair 才有）",
   "ok": false,               // 仅 execute/chart 携带
   "error_kind": "no_such_column",   // 失败时携带：结构化错误分类
   "error_message": "…"
 }
 ```
 
-**`event: final`**（一次且仅一次，结束后关闭 EventSource）：
+**`event: delta`**：回答逐字输出，`{"text": "当前这次生成的累积全文"}`（重写时整体替换）。
+
+**`event: final`**（一次且仅一次，之后连接结束）：
 ```json
 {
-  "status": "ok | ok_empty | failed | budget_exceeded | needs_clarification",
+  // ok_meta：问的是口径 / 表结构 / 之前的查询怎么算的，Agent 依据 schema 与业务字典直接回答，
+  // 没有查询数据（sql 为 null、没有结果表），前端出处应写"依据表结构与业务口径 · 未查询数据"
+  "status": "ok | ok_empty | ok_meta | failed | budget_exceeded | needs_clarification",
   "cached": false,                  // true=缓存命中（此时没有 node 事件，直接 final）
   "answer": "自然语言回答",
   "sql": "实际执行的 SQL（含守卫注入的 LIMIT）",
@@ -103,6 +123,8 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
   // 本次运行实际注入 prompt 的上下文（透明化面板用）；缓存命中或旧版本可能为 null
   "context_used": { "glossary": ["GMV"], "examples": ["各品类的成交金额"], "memories": ["口径：只统计已完成订单"] },
   "hallucination_blocked": false,   // true=回答被防幻觉拦截降级（UI 应给警示态）
+  "source_tables": ["orders", "reviews"],  // 出处：结果来自哪几张表
+  "numbers_verified": 1,            // 回答里核对过出处的数字个数
   "chart_url": "/charts/chart-ab12….png",  // 或 null；chart_error 为失败原因
   "chart_error": null,
   // status=needs_clarification 时：Agent 没有写 SQL，而是要向用户确认（其余时候为 null）
@@ -113,8 +135,8 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 }
 ```
 
-错误处理：`EventSource.onerror`（连接中断）；停止查询 = 前端 `es.close()` 即可。
-参数校验失败返回 422（question 为空/超 2000 字，note 超 500 字）。
+错误处理：读流出错或没收到 final 就断开 = 连接中断；停止查询 = `AbortController.abort()`，服务端随即停止调用模型。
+口令错误返回 401；参数校验失败返回 422（question 为空/超 2000 字，history 超 3 轮或超长，note 超 500 字）。
 
 ### 5. `GET /charts/{name}` — 沙箱图表 PNG（final 里的 chart_url 直接当 `<img src>`）
 

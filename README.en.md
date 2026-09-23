@@ -89,9 +89,9 @@ Undefined terms like "best customer" get a short list of interpretations to pick
 </td>
 <td width="33%" valign="top">
 
-**🧠 Cross-session memory**
+**🧠 Follow-ups and memory**
 
-Saved definitions and preferences are applied to every later question, so a defined term is never asked about again; on a public deployment each visitor's memory is isolated
+Follow-up questions ("what about by state?") carry the previous questions and SQL as context; saved definitions and preferences are applied to every later question, so a defined term is never asked about again, and on a public deployment each visitor's memory is isolated
 
 </td>
 <td width="33%" valign="top">

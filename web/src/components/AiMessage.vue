@@ -21,7 +21,8 @@ const runStep = computed(() => `第 ${props.msg.steps.length + 1} 步`);
 const meta = computed(() => {
   const m = props.msg;
   if (m.status === "cached") return "已跳过（缓存）";
-  const errs = m.steps.filter((s) => s.state === "error").length;
+  // 只数执行失败（之后会修正重试）；"已停止""连接中断"、图表失败都不算重试
+  const errs = m.steps.filter((s) => s.state === "error" && s.label === "守卫执行").length;
   const dur = m.latencyMs != null ? ` · ${(m.latencyMs / 1000).toFixed(1)}s` : "";
   return `${m.steps.length} 步${dur}${errs ? ` · ${errs} 次失败重试` : ""}`;
 });
@@ -38,10 +39,11 @@ const clarifyState = computed(() => {
 
 const answerText = computed(() => cleanAnswer(props.msg.answer || ""));
 
-// 回答下方的"出处"：数据来自哪几张表、数字是否核对过，一键打开右栏看 SQL
-const showSource = computed(
-  () => (props.msg.status === "done" || props.msg.status === "cached") && !!props.msg.sql,
-);
+// 回答下方的"出处"：数据来自哪几张表、数字是否核对过，一键打开右栏看 SQL；
+// 口径 / 表结构类问题没有查数据，出处写明依据，不冒充查询结果
+const finished = computed(() => props.msg.status === "done" || props.msg.status === "cached");
+const showSource = computed(() => finished.value && !props.msg.meta && !!props.msg.sql);
+const showMetaSource = computed(() => finished.value && !!props.msg.meta);
 
 function copyAnswer() {
   if (answerText.value) navigator.clipboard?.writeText(answerText.value);
@@ -143,6 +145,12 @@ function copyAnswer() {
       </template>
       <span class="srclink" @click="store.panelId = msg.id">查看 SQL ›</span>
     </div>
+    <div v-else-if="showMetaSource" class="source">
+      <span class="srctag">依据</span>
+      <span>表结构与业务口径</span>
+      <span class="dotsep">·</span>
+      <span>未查询数据</span>
+    </div>
 
     <ResultTable v-if="msg.columns && msg.columns.length" :msg="msg" />
 
@@ -151,7 +159,7 @@ function copyAnswer() {
 
     <div v-if="msg.status !== 'running' && msg.status !== 'clarify'" class="foot">
       <span v-if="msg.answer" @click="copyAnswer">复制回答</span>
-      <span title="强制重新执行，不走缓存" @click="store.ask(msg.q, { fresh: true, clarify: !msg.noClarify })">重跑</span>
+      <span title="强制重新执行，不走缓存" @click="store.rerun(msg.id)">重跑</span>
     </div>
   </div>
 </template>

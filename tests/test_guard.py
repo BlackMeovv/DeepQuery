@@ -35,9 +35,6 @@ class TestAllowed:
     def test_union(self):
         ok("SELECT id FROM customers UNION SELECT id FROM products")
 
-    def test_no_table_select(self):
-        ok("SELECT 1 + 1")
-
     def test_trailing_semicolon(self):
         ok("SELECT * FROM customers;")
 
@@ -55,6 +52,29 @@ class TestLimitEnforcement:
     def test_small_limit_kept(self):
         verdict = ok("SELECT * FROM customers LIMIT 5")
         assert "LIMIT 5" in verdict.sql.upper()
+
+
+class TestNoTable:
+    """不读任何表的 SQL：数字是模型写进去的，不是查出来的，不能当查询结果。"""
+
+    def test_constant_select(self):
+        v = rejected("SELECT 1 + 1", "guard_rejected")
+        assert "没有读取任何数据表" in v.reason
+
+    def test_constant_union(self):
+        rejected("SELECT '销售额' AS 指标, 'orders' AS 表 UNION ALL SELECT '评分', 'reviews'", "guard_rejected")
+
+    def test_values_cte(self):
+        rejected("WITH t(a) AS (VALUES (1), (2)) SELECT a FROM t", "guard_rejected")
+
+    def test_constant_cte(self):
+        rejected("WITH t AS (SELECT 42 AS n) SELECT n FROM t", "guard_rejected")
+
+    def test_table_in_subquery_counts(self):
+        ok("SELECT (SELECT COUNT(*) FROM orders) AS n")
+
+    def test_exists_counts(self):
+        ok("SELECT 1 AS has_orders WHERE EXISTS (SELECT 1 FROM orders)")
 
 
 class TestRejected:

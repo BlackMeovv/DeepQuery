@@ -94,6 +94,7 @@ def validate(
     # 表白名单：排除 CTE 别名后，所有引用的表必须在白名单内
     cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
     allowed_lower = {t.lower() for t in allowed_tables}
+    real_tables = 0
     for table in tree.find_all(exp.Table):
         if table.args.get("db") or table.args.get("catalog"):
             return GuardVerdict.reject(
@@ -114,6 +115,14 @@ def validate(
                 "guard_rejected",
                 f"表 `{table.name}` 不在白名单内（可用表: {', '.join(sorted(allowed_tables))}）",
             )
+        real_tables += 1
+
+    # 一张表都不读（SELECT 常量、VALUES 拼出来的"结果"）：数字是模型自己写进 SQL 的，
+    # 并非来自数据库，却会被当成"查询结果"展示、还能通过数字出处校验——必须拦下
+    if real_tables == 0:
+        return GuardVerdict.reject(
+            sql, "guard_rejected", "查询没有读取任何数据表：结果不来自数据库，不能作为查询结果"
+        )
 
     tree = _enforce_limit(tree, max_rows)
     return GuardVerdict(allowed=True, sql=tree.sql(dialect=dialect))

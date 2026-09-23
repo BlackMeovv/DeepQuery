@@ -9,9 +9,11 @@ import {
   ping,
   setAccessCode,
   useVisitorId,
+  type AskHandle,
   type Clarification,
   type EnvInfo,
   type FinalPayload,
+  type HistoryTurn,
   type MemoryNote,
   type SchemaTable,
 } from "../lib/api";
@@ -54,6 +56,7 @@ export interface AiMsg {
   clarifyAnswered?: string; // 用户对这次确认给出的回答
   noClarify?: boolean; // 这是回答确认后的追问：不再允许反问（重跑时沿用）
   clarifySkipped?: boolean; // 用户选择跳过确认、改问别的
+  meta?: boolean; // 问的是口径 / 表结构：依据 schema 直接回答，没有查询数据
 }
 
 export type Msg = UserMsg | AiMsg;
@@ -68,12 +71,31 @@ const NODE_LABELS: Record<string, string> = {
   summarize: "归纳回答",
   fallback: "降级收尾",
   clarify: "需要向你确认",
+  explain: "依据表结构回答",
 };
+
+// 追问时带给后端的上下文：最近两轮已完成的问答（与后端 HistoryTurn 的长度上限一致）
+const HISTORY_TURNS = 2;
+
+function historyOf(msgs: Msg[]): HistoryTurn[] {
+  const turns: HistoryTurn[] = [];
+  for (const m of msgs) {
+    if (m.role !== "ai" || !["done", "cached", "blocked"].includes(m.status)) continue;
+    if (!m.sql && !m.answer) continue;
+    turns.push({
+      question: m.q.slice(0, 500),
+      sql: (m.sql || "").slice(0, 4000),
+      answer: (m.answer || "").slice(0, 600),
+    });
+  }
+  return turns.slice(-HISTORY_TURNS);
+}
 
 interface AskOptions {
   fresh?: boolean; // 跳过缓存强制重跑
   display?: string; // 对话里显示的用户消息（默认就是问题本身）
   clarify?: boolean; // 是否允许 Agent 先反问确认（默认允许）
+  history?: HistoryTurn[]; // 之前几轮对话（默认取当前会话里最近完成的几轮）
 }
 
 const CONVOS_KEY = "ia2_convos";
@@ -100,7 +122,7 @@ export const useAppStore = defineStore("app", {
     running: false,
     panelId: null as string | null,
     theme: (localStorage.getItem(THEME_KEY) || "light") as "light" | "dark",
-    stream: null as EventSource | null,
+    stream: null as AskHandle | null,
   }),
 
   getters: {
@@ -219,6 +241,7 @@ export const useAppStore = defineStore("app", {
       const q = question.trim();
       if (!q || this.running) return;
       const clarify = opts.clarify ?? true;
+      const history = opts.history ?? historyOf(this.msgs);
 
       if (!this.curConvo) {
         const convo: Convo = { id: String(Date.now()), title: q.slice(0, 16), msgs: [] };
@@ -240,7 +263,7 @@ export const useAppStore = defineStore("app", {
         if (m) Object.assign(m, obj);
       };
 
-      this.stream = askStream(q, this.chartOn, {
+      this.stream = askStream({ question: q, chart: this.chartOn, fresh: opts.fresh ?? false, clarify, history }, {
         onDelta: (text) => {
           const m = this.msgs.find((x) => x.id === aiId) as AiMsg;
           if (m.status === "running") m.answer = text;
@@ -269,6 +292,7 @@ export const useAppStore = defineStore("app", {
               : p.hallucination_blocked ? "blocked"
               : p.status.startsWith("ok") ? "done" : "failed",
             clarification: needsClarify ? p.clarification : null,
+            meta: p.status === "ok_meta",
             sql: p.sql,
             answer: p.hallucination_blocked || needsClarify ? undefined : p.answer,
             blockedText: p.hallucination_blocked ? p.answer : undefined,
@@ -289,15 +313,27 @@ export const useAppStore = defineStore("app", {
           this.stream = null;
           this.persist();
         },
-        onError: () => {
+        onError: (message) => {
           patch({ status: "failed" });
           const m = this.msgs.find((x) => x.id === aiId) as AiMsg;
-          m.steps.push({ label: "连接中断", state: "error", err: "与服务器的连接断开了（网络波动或代理超时），点「重跑」再试一次" });
+          m.steps.push({
+            label: message ? "请求失败" : "连接中断",
+            state: "error",
+            err: message || "与服务器的连接断开了（网络波动或代理超时），点「重跑」再试一次",
+          });
           this.running = false;
           this.stream = null;
           this.persist();
         },
-      }, undefined, opts.fresh ?? false, clarify);
+      });
+    },
+
+    /** 重跑：不走缓存，并沿用这条消息当时的对话上下文（它之前的那几轮），而不是现在最新的 */
+    rerun(msgId: string) {
+      const i = this.msgs.findIndex((x) => x.id === msgId);
+      const m = this.msgs[i] as AiMsg | undefined;
+      if (!m || m.role !== "ai") return;
+      this.ask(m.q, { fresh: true, clarify: !m.noClarify, history: historyOf(this.msgs.slice(0, i)) });
     },
 
     /**

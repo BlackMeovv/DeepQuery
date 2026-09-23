@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     server_port: int = 8000
     # 前端联调 CORS：逗号分隔的允许来源（如 http://localhost:5173）；留空则关闭
     cors_allow_origins: str = ""
-    # 演示部署访问口令：配置后 /api/ask 与记忆读写需携带 ?code=（空=关闭）；
+    # 演示部署访问口令：配置后提问与记忆读写需携带口令（POST /api/ask 放请求体，其余走 ?code=；空=关闭）；
     # 同时前端会给每个浏览器分配独立的访客 ID，记忆按访客隔离
     demo_access_code: str = ""
     # 公网演示的费用防线（0 = 关闭）：单个访客每分钟最多提问/写记忆次数；

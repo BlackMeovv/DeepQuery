@@ -4,7 +4,8 @@
 
 接口：
     GET  /                     演示网页（无前端框架，单文件）
-    GET  /api/ask?question=…&chart=0|1   SSE：逐节点进度 + 最终结果
+    POST /api/ask              SSE：逐节点进度 + 最终结果（JSON 请求体，可带之前几轮对话，支持追问）
+    GET  /api/ask?question=…&chart=0|1   同上的简化版（不带对话上下文；旧版单文件页使用）
     GET  /charts/{name}        沙箱生成的图表文件
     GET  /metrics              Prometheus 指标
     GET  /healthz
@@ -66,6 +67,34 @@ def memory_scope(agent: DeepQuery, user: str) -> str:
     return hashlib.sha256("\n".join(notes).encode("utf-8")).hexdigest()[:16]
 
 
+class HistoryTurn(BaseModel):
+    """同一会话里之前的一轮。来自浏览器、不可信：只拼进提示词供模型理解追问，从不执行。"""
+
+    question: str = Field(min_length=1, max_length=500)
+    sql: str = Field(default="", max_length=4000)
+    answer: str = Field(default="", max_length=600)
+
+
+class AskBody(BaseModel):
+    # 用 POST 而不是 GET 查询参数：带上之前几轮的 SQL 后，URL 会超过 nginx 默认的 8KB 请求行上限；
+    # 口令放在请求体里，也不会出现在代理的访问日志里
+    question: str = Field(min_length=1, max_length=2000)
+    chart: bool = False
+    user: str = Field(default="default", max_length=64)
+    fresh: bool = False  # 跳过缓存读取强制重跑（结果仍会写入缓存）
+    clarify: bool = True  # 允许 Agent 先向用户确认；回答澄清后的追问传 false，避免反复追问
+    code: str | None = Field(default=None, max_length=64)
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=3)
+
+
+def history_scope(history: list[dict]) -> str:
+    """对话上下文的指纹：同一句"那按月呢"接在不同的上一问后面，答案不同，缓存必须区分。"""
+    if not history:
+        return ""
+    blob = json.dumps(history, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 class MemoryNote(BaseModel):
     # 注意：必须定义在模块顶层——`from __future__ import annotations` 下，
     # 函数内的局部类无法被 FastAPI 的类型解析找到，会被误判成查询参数
@@ -80,6 +109,7 @@ _NODE_LABELS = {
     "summarize": "归纳回答",
     "fallback": "降级收尾",
     "clarify": "需要向你确认",
+    "explain": "依据表结构回答",
 }
 
 
@@ -196,7 +226,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
     def require_code(code: str | None) -> None:
         """演示部署的访问口令（.env 配 DEMO_ACCESS_CODE 即启用；不配=关闭）。
 
-        SSE 的 EventSource 无法携带自定义请求头，所以统一走 `code` 查询参数；
+        POST /api/ask 放在请求体里；其余 GET 接口（含旧版页面用的 GET /api/ask）走 `code` 查询参数；
         比较用 compare_digest 防时序侧信道。保护提问与记忆读写；
         healthz/schema/静态页保持开放。
         """
@@ -306,6 +336,14 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             raise HTTPException(status_code=404)
         return FileResponse(path, media_type="image/png")
 
+    @app.post("/api/ask")
+    def api_ask_post(request: Request, body: AskBody):
+        require_code(body.code)
+        return ask_response(
+            request, body.question, body.chart, body.user, body.fresh, body.clarify,
+            [t.model_dump() for t in body.history],
+        )
+
     @app.get("/api/ask")
     def api_ask(
         request: Request,
@@ -317,17 +355,32 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         code: str | None = Query(None, max_length=64),
     ):
         require_code(code)
+        return ask_response(request, question, chart, user, fresh, clarify, [])
+
+    def ask_response(
+        request: Request,
+        question: str,
+        chart: bool,
+        user: str,
+        fresh: bool,
+        clarify: bool,
+        history: list[dict],
+    ) -> StreamingResponse:
         sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         if not limiter.hit(client_key(request)):
-            # EventSource 读不到非 200 响应的内容，所以用一条 final 事件把原因告诉用户
+            # 用一条 final 事件告诉用户原因（EventSource 读不到非 200 响应的内容；前端按正常结果展示）
             REQUESTS.labels(status="rate_limited").inc()
             notice = _sse("final", _notice_payload("请求太频繁了，请稍等一分钟再试。"))
             return StreamingResponse(iter([notice]), media_type="text/event-stream", headers=sse_headers)
         agent_ = get_agent()
         # 缓存按"记忆内容"而不是访客 ID 区分：没有记忆（或记忆相同）的访客共享同一份答案，
         # 示例问题只需付一次钱；有私有记忆的访客答案可能不同，自然落到各自的键上
+        # 有对话上下文时再加一段它的指纹（没有时保持原来的键，已有缓存继续有效）
+        scope = memory_scope(agent_, user)
+        if history:
+            scope += f"|h:{history_scope(history)}"
         key = cache_key(
-            f"{memory_scope(agent_, user)}|{question}",
+            f"{scope}|{question}",
             db_path=settings.db_path,
             model=agent_.llm.model_name,
             chart=chart,
@@ -378,6 +431,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                         allow_clarify=clarify,
                         handle=handle,
                         interactive=True,
+                        history=history,
                     ):
                         put(("node", _node_event(item, extra or {})) if kind == "node" else ("outcome", item))
                 except RunCancelled:
