@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { tokenizeSql } from "../lib/sql";
-import { pillOf, useAppStore, type AiMsg } from "../stores/app";
+import { prettySql, tokenizeSql } from "../lib/sql";
+import { nextStepOf, pillOf, useAppStore, type AiMsg } from "../stores/app";
 
 const props = defineProps<{ msg: AiMsg }>();
 const store = useAppStore();
@@ -32,7 +32,7 @@ const ctxUsed = computed(
 );
 
 const pill = computed(() => pillOf(props.msg.status));
-const sqlToks = computed(() => (props.msg.sql ? tokenizeSql(props.msg.sql) : []));
+const sqlToks = computed(() => (props.msg.sql ? tokenizeSql(prettySql(props.msg.sql)) : []));
 const usageLine = computed(() => {
   const u = props.msg.usage;
   if (!u) return "";
@@ -80,7 +80,7 @@ function copySql() {
           </div>
           <div v-if="msg.status === 'running'" class="step">
             <span class="spinner"></span>
-            <div class="sbody"><div class="slabel" style="color: var(--ink3)">等待下一步…</div></div>
+            <div class="sbody"><div class="slabel" style="color: var(--ink3)">{{ nextStepOf(msg) }}…</div></div>
           </div>
         </div>
 

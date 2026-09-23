@@ -44,6 +44,7 @@ export interface AiMsg {
   latencyMs?: number;
   selectedTables?: string[] | null;
   contextUsed?: { glossary: string[]; examples: string[]; memories: string[] } | null;
+  chart?: boolean; // 本次提问是否请求了图表
 }
 
 export type Msg = UserMsg | AiMsg;
@@ -199,7 +200,7 @@ export const useAppStore = defineStore("app", {
       }
 
       const aiId = "a" + Date.now();
-      const ai: AiMsg = { id: aiId, role: "ai", q, status: "running", steps: [] };
+      const ai: AiMsg = { id: aiId, role: "ai", q, status: "running", steps: [], chart: this.chartOn };
       this.msgs.push({ id: "u" + Date.now(), role: "user", text: q });
       this.msgs.push(ai);
       this.draft = "";
@@ -272,6 +273,22 @@ export const useAppStore = defineStore("app", {
     },
   },
 });
+
+/**
+ * 运行中"正在进行的一步"。后端在节点完成时才推事件，所以只能由最后完成的一步推断：
+ * 直接显示最后一条会把"守卫执行 ✓"误标成"正在守卫执行"，而此时其实在归纳回答。
+ */
+export function nextStepOf(m: AiMsg): string {
+  if (m.answer) return "归纳回答"; // 已经在逐字输出回答
+  const last = m.steps[m.steps.length - 1];
+  if (!last) return "生成 SQL";
+  if (last.label === "守卫执行") {
+    if (last.state === "error") return "修正并重试";
+    return m.chart ? "生成图表" : "归纳回答";
+  }
+  if (last.label === "生成图表") return "归纳回答";
+  return "守卫执行"; // 生成 SQL / 修正并重试之后都是执行
+}
 
 export function pillOf(status: MsgStatus) {
   return {

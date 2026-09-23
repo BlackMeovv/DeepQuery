@@ -21,3 +21,15 @@ export function tokenizeSql(sql: string): SqlToken[] {
   }
   return out;
 }
+
+// 展示用排版：守卫改写后的 SQL 是单行的，在窄面板里只看得到开头。
+// 在主要子句前换行（跳过字符串字面量），不改变语义；复制按钮仍复制原文。
+const CLAUSE = /\s+((?:LEFT |RIGHT |INNER |FULL |CROSS )?(?:OUTER )?JOIN|FROM|WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|UNION(?: ALL)?)\s+/gi;
+
+export function prettySql(sql: string): string {
+  if (sql.includes("\n")) return sql;
+  return sql
+    .split(/('[^']*')/)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(CLAUSE, "\n$1 ")))
+    .join("");
+}

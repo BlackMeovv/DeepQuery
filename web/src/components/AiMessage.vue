@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { pillOf, useAppStore, type AiMsg } from "../stores/app";
+import { nextStepOf, pillOf, useAppStore, type AiMsg } from "../stores/app";
 import DqLogo from "./DqLogo.vue";
 import ResultTable from "./ResultTable.vue";
 
@@ -19,12 +19,9 @@ watch(
 
 const pill = computed(() => pillOf(props.msg.status));
 
-// 运行中胶囊：显示当前步骤名 + 序号（设计稿的「正在生成 SQL · 第 1 步」）
-const runLabel = computed(() => {
-  const last = props.msg.steps[props.msg.steps.length - 1];
-  return last ? `正在${last.label}` : "正在运行";
-});
-const runStep = computed(() => (props.msg.steps.length ? `第 ${props.msg.steps.length} 步` : ""));
+const nextStep = computed(() => nextStepOf(props.msg));
+const runLabel = computed(() => `正在${nextStep.value}`);
+const runStep = computed(() => `第 ${props.msg.steps.length + 1} 步`);
 
 const meta = computed(() => {
   const m = props.msg;
@@ -90,7 +87,7 @@ function copyAnswer() {
           <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
           <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
         </svg>
-        <div class="sbody"><div class="slabel" style="color: var(--ink3)">等待下一步…</div></div>
+        <div class="sbody"><div class="slabel" style="color: var(--ink3)">{{ nextStep }}…</div></div>
       </div>
     </div>
 
