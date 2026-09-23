@@ -21,6 +21,7 @@ export type MsgStatus = "running" | "done" | "blocked" | "cached" | "stopped" | 
 export interface Step {
   label: string;
   thought?: string;
+  sql?: string;
   err?: string;
   state: "run" | "ok" | "error";
 }
@@ -47,6 +48,8 @@ export interface AiMsg {
   selectedTables?: string[] | null;
   contextUsed?: { glossary: string[]; examples: string[]; memories: string[] } | null;
   chart?: boolean; // 本次提问是否请求了图表
+  sourceTables?: string[];
+  numbersVerified?: number;
   clarification?: Clarification | null; // Agent 拿不准时向用户提的确认
   clarifyAnswered?: string; // 用户对这次确认给出的回答
   noClarify?: boolean; // 这是回答确认后的追问：不再允许反问（重跑时沿用）
@@ -244,6 +247,13 @@ export const useAppStore = defineStore("app", {
         },
         onNode: (e) => {
           const m = this.msgs.find((x) => x.id === aiId) as AiMsg;
+          if (e.node === "generate_sql" || e.node === "repair") {
+            // 一次模型调用里先想后写：拆成"思考"和"生成 SQL"两步展示；只想不写（要向你确认）时没有第二步
+            const first = e.node === "repair" ? "分析失败原因" : "理解问题";
+            if (e.thought || !e.sql) m.steps.push({ label: first, thought: e.thought, state: "ok" });
+            if (e.sql) m.steps.push({ label: e.node === "repair" ? "改写 SQL" : "生成 SQL", sql: e.sql, state: "ok" });
+            return;
+          }
           m.steps.push({
             label: NODE_LABELS[e.node] || e.label,
             thought: e.thought,
@@ -270,6 +280,8 @@ export const useAppStore = defineStore("app", {
             attempts: p.attempts,
             selectedTables: p.selected_tables,
             contextUsed: p.context_used,
+            sourceTables: p.source_tables ?? [],
+            numbersVerified: p.numbers_verified ?? 0,
             usage: { calls: p.usage.llm_calls, tokens: p.usage.total_tokens, cost: p.usage.cost },
             latencyMs: p.latency_ms,
           });
@@ -338,7 +350,7 @@ export const useAppStore = defineStore("app", {
 export function nextStepOf(m: AiMsg): string {
   if (m.answer) return "归纳回答"; // 已经在逐字输出回答
   const last = m.steps[m.steps.length - 1];
-  if (!last) return "生成 SQL";
+  if (!last) return "理解问题";
   if (last.label === "守卫执行") {
     if (last.state === "error") return "修正并重试";
     return m.chart ? "生成图表" : "归纳回答";

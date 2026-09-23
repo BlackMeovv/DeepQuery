@@ -38,7 +38,7 @@ def _get_agent():
 
 def ask_data(question: str, user: str = "default") -> dict[str, Any]:
     """用自然语言查询业务数据库。返回回答、SQL 与结果预览。"""
-    outcome = _get_agent().ask(question, user_id=user, allow_clarify=True)
+    outcome = _get_agent().ask(question, user_id=user, allow_clarify=True, interactive=True)
     return {
         "status": outcome.status,
         "answer": outcome.answer,

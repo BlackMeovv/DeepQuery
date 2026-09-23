@@ -130,3 +130,20 @@ def _enforce_limit(tree: exp.Expression, max_rows: int) -> exp.Expression:
             value.set("this", str(max_rows))
         return tree
     return tree.limit(max_rows)
+
+
+def tables_in_sql(sql: str, dialect: str = "sqlite") -> set[str]:
+    """提取 SQL 引用的真实表名（排除 CTE 别名，小写）。
+
+    用于评测的选表召回率，以及回答下方展示"数据来自哪几张表"。
+    """
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except sqlglot.errors.SqlglotError:
+        return set()
+    cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+    return {
+        t.name.lower()
+        for t in tree.find_all(exp.Table)
+        if isinstance(t.this, exp.Identifier) and t.name.lower() not in cte_names
+    }

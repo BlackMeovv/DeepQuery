@@ -39,6 +39,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         generate_chart=args.chart,
         user_id=args.user,
         allow_clarify=True,
+        interactive=True,
     )
 
     # 模型/数据库产出的文本都是不受信内容，必须 escape/Text 后再交给 rich 渲染

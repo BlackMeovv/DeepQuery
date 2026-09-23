@@ -20,6 +20,8 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
+from ..guard import tables_in_sql  # noqa: F401 —— 评测里算选表召回率用，保留原导入路径
+
 _SCORER_MAX_ROWS = 10_000  # 打分不受 agent 行数限额影响，用更高的安全上限
 
 
@@ -48,20 +50,6 @@ def _run(db_path: str | Path, sql: str) -> tuple[list[str], list[tuple]]:
         return colnames, [tuple(_normalize_cell(v) for v in row) for row in rows]
     finally:
         conn.close()
-
-
-def tables_in_sql(sql: str) -> set[str]:
-    """提取 SQL 引用的真实表名（排除 CTE 别名，小写）。选表召回率用。"""
-    try:
-        tree = sqlglot.parse_one(sql, read="sqlite")
-    except sqlglot.errors.SqlglotError:
-        return set()
-    cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
-    return {
-        t.name.lower()
-        for t in tree.find_all(exp.Table)
-        if isinstance(t.this, exp.Identifier) and t.name.lower() not in cte_names
-    }
 
 
 def gold_order_matters(gold_sql: str) -> bool:

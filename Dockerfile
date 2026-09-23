@@ -30,6 +30,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     # matplotlib 供容器内 subprocess 图表执行（容器本身即隔离边界）
     uv pip install matplotlib
 
+# 图表中文字体 + 预建 matplotlib 字体缓存（沙箱子进程只读使用，不必每次重新扫描字体）
+ENV MPLCONFIGDIR=/opt/mplconfig
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-wqy-microhei && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /opt/mplconfig && \
+    /app/.venv/bin/python -c "import matplotlib.font_manager" && \
+    chmod -R a+rX /opt/mplconfig
+
 EXPOSE 8000
 # 启动前：数据目录只允许 root 访问（图表子进程换成无权限 uid 后读不到记忆库等数据）；
 # 确保 DB_PATH 指向的库存在：演示库现场生成，Olist 首次启动时从 Kaggle 下载并导入

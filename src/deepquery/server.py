@@ -31,6 +31,7 @@ from .agent import DeepQuery, RunOutcome
 from .budget import RunCancelled, RunHandle
 from .cache import BaseCache, build_cache, cache_key
 from .config import Settings, get_settings
+from .guard import tables_in_sql
 from .ratelimit import DailyBudget, SlidingWindowLimiter
 
 # ---------- Prometheus 指标 ----------
@@ -84,6 +85,8 @@ def _node_event(node: str, delta: dict) -> dict:
     payload: dict = {"node": node, "label": _NODE_LABELS.get(node, node)}
     if delta.get("thought"):
         payload["thought"] = delta["thought"]
+    if node in ("generate_sql", "repair") and delta.get("candidate_sql"):
+        payload["sql"] = delta["candidate_sql"]  # 前端先展示思路、再展示生成的 SQL
     attempts = delta.get("attempts")
     if node == "execute" and attempts:
         last = attempts[-1]
@@ -105,6 +108,7 @@ def _notice_payload(message: str) -> dict:
         "predicted_sql": None, "columns": [], "rows": [], "row_count": 0, "attempts": [],
         "selected_tables": None, "context_used": None, "hallucination_blocked": False,
         "chart_url": None, "chart_error": None, "clarification": None,
+        "source_tables": [], "numbers_verified": 0,
         "usage": {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}, "latency_ms": 0,
     }
 
@@ -132,6 +136,9 @@ def _outcome_payload(outcome: RunOutcome, cached: bool = False) -> dict:
         "selected_tables": outcome.selected_tables,
         "context_used": outcome.context_used,
         "hallucination_blocked": outcome.hallucination_blocked,
+        # 回答下方的"出处"：数据来自哪几张表、回答里有几个数字核对过出处
+        "source_tables": sorted(tables_in_sql(outcome.final_sql)) if outcome.final_sql else [],
+        "numbers_verified": outcome.numbers_verified,
         "chart_url": f"/charts/{Path(outcome.chart_path).name}" if outcome.chart_path else None,
         "chart_error": outcome.chart_error,
         "clarification": outcome.clarification,
@@ -364,6 +371,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                         on_answer_delta=lambda text: put(("delta", {"text": text})),
                         allow_clarify=clarify,
                         handle=handle,
+                        interactive=True,
                     ):
                         put(("node", _node_event(item, extra or {})) if kind == "node" else ("outcome", item))
                 except RunCancelled:

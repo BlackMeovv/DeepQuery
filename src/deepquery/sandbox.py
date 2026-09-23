@@ -37,6 +37,60 @@ if TYPE_CHECKING:
 
 
 # 完整 8 字节 PNG 签名；产物上限 10MB（正常图表几十到几百 KB）
+# 统一图表样式：写进工作目录的 matplotlibrc（matplotlib 优先读取当前目录下的这个文件），
+# 模型写的画图代码不用管配色和字体，也就不会各画各的风格。
+# 颜色取自界面主色 + 经色盲安全校验的分类色板；rc 文件里 # 是注释，所以颜色不带 #
+MATPLOTLIBRC = """\
+figure.figsize: 8, 4.6
+figure.dpi: 100
+figure.facecolor: fbf8f3
+savefig.dpi: 200
+savefig.facecolor: fbf8f3
+savefig.bbox: tight
+savefig.pad_inches: 0.3
+font.family: sans-serif
+font.sans-serif: WenQuanYi Micro Hei, WenQuanYi Zen Hei, Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, DejaVu Sans
+font.size: 10.5
+axes.unicode_minus: False
+axes.facecolor: fbf8f3
+axes.edgecolor: d9d0c3
+axes.linewidth: 0.8
+axes.spines.top: False
+axes.spines.right: False
+axes.spines.left: False
+axes.grid: True
+axes.grid.axis: y
+axes.axisbelow: True
+axes.formatter.useoffset: False
+axes.formatter.limits: -7, 12
+axes.titlesize: 13
+axes.titleweight: bold
+axes.titlelocation: left
+axes.titlepad: 14
+axes.titlecolor: 201e1d
+axes.labelsize: 10
+axes.labelcolor: 645c50
+axes.labelpad: 8
+axes.prop_cycle: cycler('color', ['c67139', '2a78d6', '1baf7a', '4a3aa7', 'e87ba4', '008300', 'eda100', 'e34948'])
+grid.color: e9e2d6
+grid.linewidth: 0.8
+xtick.color: 82796a
+ytick.color: 82796a
+xtick.labelcolor: 645c50
+ytick.labelcolor: 201e1d
+xtick.major.size: 0
+ytick.major.size: 0
+xtick.major.pad: 6
+ytick.major.pad: 8
+text.color: 201e1d
+legend.frameon: False
+legend.fontsize: 9.5
+lines.linewidth: 2.2
+lines.markersize: 6
+lines.solid_capstyle: round
+patch.linewidth: 0
+"""
+
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _MAX_CHART_BYTES = 10 * 1024 * 1024
 _KEEP_CHARTS = 500  # 输出目录只保留最近的图表，防止磁盘被慢慢写满
@@ -92,6 +146,7 @@ class BaseSandbox:
         workdir = tempfile.mkdtemp(prefix="deepquery-chart-")
         Path(workdir, "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         Path(workdir, "chart.py").write_text(code, encoding="utf-8")
+        Path(workdir, "matplotlibrc").write_text(MATPLOTLIBRC, encoding="utf-8")
         return workdir
 
     def _collect(self, workdir: str, out_dir: str | Path, logs: str) -> SandboxResult:
@@ -153,6 +208,8 @@ class SubprocessSandbox(BaseSandbox):
                 "OMP_NUM_THREADS": "1",  # 数值库别按 CPU 数开线程（线程也计入进程数上限）
                 "OPENBLAS_NUM_THREADS": "1",
             }
+            if os.environ.get("MPLCONFIGDIR"):  # 镜像里预建的字体缓存，省掉每次几秒的字体扫描
+                env["MPLCONFIGDIR"] = os.environ["MPLCONFIGDIR"]
             if uid is not None:
                 os.chown(workdir, uid, uid)  # 子进程要在工作目录里写 chart.png
 

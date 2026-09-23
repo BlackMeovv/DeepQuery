@@ -82,11 +82,19 @@ def check_answer(
 ) -> list[str]:
     """返回回答中"无出处"的数字原文列表；空列表 = 校验通过。"""
     allowed = allowed_values(result, question, sql)
-    violations = []
+    return [num.raw for num in _checkable(answer) if not any(num.matches(v) for v in allowed)]
+
+
+def _checkable(answer: str) -> list:
+    out = []
     for num in extract_numbers(answer):
         primary = num.candidates[0][0]
         if primary == int(primary) and 0 <= primary <= _SMALL_INT_WHITELIST and "." not in num.raw:
             continue  # 序数/枚举类小整数放行
-        if not any(num.matches(v) for v in allowed):
-            violations.append(num.raw)
-    return violations
+        out.append(num)
+    return out
+
+
+def checked_number_count(answer: str) -> int:
+    """回答里需要核对出处的数字个数（通过校验的回答里，这些数字都能在结果/问题/SQL 中找到）。"""
+    return len(_checkable(answer or ""))

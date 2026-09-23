@@ -69,6 +69,7 @@ export interface NodeEvent {
   node: string;
   label: string;
   thought?: string;
+  sql?: string; // generate_sql / repair 节点生成的 SQL
   ok?: boolean;
   error_kind?: string;
   error_message?: string;
@@ -107,6 +108,8 @@ export interface FinalPayload {
   selected_tables: string[] | null;
   context_used: { glossary: string[]; examples: string[]; memories: string[] } | null;
   hallucination_blocked: boolean;
+  source_tables?: string[]; // 回答依据的数据来自哪几张表
+  numbers_verified?: number; // 回答中核对过出处的数字个数
   chart_url: string | null;
   chart_error: string | null;
   clarification?: Clarification | null;

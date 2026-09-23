@@ -34,7 +34,7 @@ from ..retrieval import SchemaRetriever, build_embedder, load_examples, load_glo
 from ..sandbox import build_sandbox
 from ..tools.contract import QueryResult
 from ..tracing import NOOP_TRACER, RunTrace, Tracer
-from ..verify import check_answer
+from ..verify import check_answer, checked_number_count
 from . import prompts
 
 
@@ -62,6 +62,7 @@ class RunOutcome:
     selected_tables: list[str] | None = None  # Schema RAG 选中的表（未启用时为 None）
     context_used: dict | None = None  # 本次注入的上下文明细：glossary/examples/memories
     hallucination_blocked: bool = False  # 回答因数字无出处被拦截降级
+    numbers_verified: int = 0  # 回答中通过出处校验的数字个数（校验关闭或未生成回答时为 0）
     chart_path: str | None = None  # 沙箱生成的图表文件（未请求/失败时为 None）
     chart_error: str | None = None
     clarification: dict | None = None  # 需要向用户确认时：{question, term, options}
@@ -90,11 +91,13 @@ class _State(TypedDict, total=False):
     status: str
     answer: str
     hallucination_blocked: bool
+    numbers_verified: int
     meter: Any  # UsageMeter（对象通道，就地累加）
     trace: Any  # RunTrace（追踪句柄，未启用时为 no-op）
     on_answer_delta: Any  # 可选回调：回答生成的流式增量（SSE 逐字输出用）
     allowed_tables: Any  # 本次运行开始时的表白名单快照（运行中 schema 刷新不影响本次）
     allow_clarify: bool  # 交互模式：允许模型先向用户确认（评测时关闭）
+    interactive: bool  # 在线问答：结果给人看（名单默认前 10、匿名 ID 带辨认列）；评测时关闭
     clarification: dict  # 模型提出的澄清问题
 
 
@@ -131,6 +134,8 @@ def extract_thought(text: str) -> str:
 
 
 _CLARIFY_OPTION = re.compile(r"^\s*(?:[-*•]|\d+[.、)])\s*")
+# 模型常照抄"选项一："这类前缀，展示和拼回问题时都去掉
+_OPTION_PREFIX = re.compile(r"^(?:选项|方案)\s*[一二三四五六七八九十\d]+\s*[:：、.]\s*")
 
 
 def extract_clarification(text: str) -> dict | None:
@@ -144,7 +149,7 @@ def extract_clarification(text: str) -> dict | None:
             if not line:
                 continue
             if _CLARIFY_OPTION.match(line):
-                opt = _CLARIFY_OPTION.sub("", line).strip()
+                opt = _OPTION_PREFIX.sub("", _CLARIFY_OPTION.sub("", line)).strip()
                 if opt and len(options) < 4:
                     options.append(opt[:60])
             elif re.match(r"^问题\s*[:：]", line):
@@ -156,6 +161,22 @@ def extract_clarification(text: str) -> dict | None:
         if question:
             return {"question": question[:120], "term": term[:30], "options": options}
     return None
+
+
+def plain_answer(text: str) -> str:
+    """回答只保留普通句子：去掉 Markdown 表格行、加粗和标题符号。
+
+    查询结果本来就以表格单独展示；提示词已要求不用 Markdown，这里再兜一次底。
+    在数字校验之前做：展示给用户的、被核对的、被计数的是同一段文字。
+    """
+    all_lines = (text or "").splitlines()
+    lines = [line for line in all_lines if not re.match(r"^\s*\|.*\|\s*$", line)]
+    out = "\n".join(lines)
+    out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)
+    out = re.sub(r"^#{1,6}\s+", "", out, flags=re.M).strip()
+    if len(lines) < len(all_lines):  # 去掉了表格："……是：" 这类引子改成指向下方的结果表
+        out = re.sub(r"(如下|是|为)?\s*[:：]$", "见下方结果表。", out)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
 def extract_code(text: str, langs: tuple[str, ...] = ("python", "py")) -> str:
@@ -340,6 +361,7 @@ class DeepQuery:
         generate_chart: bool = False,
         user_id: str = "default",
         allow_clarify: bool = False,
+        interactive: bool = False,
     ) -> RunOutcome:
         """回答一个自然语言问题。generate_answer=False 时跳过总结节点（评测省成本）；
         generate_chart=True 时对成功结果生成图表（模型写代码 → 沙箱执行）；
@@ -347,7 +369,7 @@ class DeepQuery:
         评测保持关闭，提示词与历史评测一致）。"""
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id, allow_clarify
+            question, generate_answer, generate_chart, user_id, allow_clarify, interactive
         )
         try:
             final: dict = self._graph.invoke(state, config=self._run_config())
@@ -366,6 +388,7 @@ class DeepQuery:
         on_answer_delta=None,
         allow_clarify: bool = False,
         handle: RunHandle | None = None,
+        interactive: bool = False,
     ):
         """逐节点流式执行（服务端 SSE 用）。
 
@@ -376,7 +399,7 @@ class DeepQuery:
         """
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id, allow_clarify
+            question, generate_answer, generate_chart, user_id, allow_clarify, interactive
         )
         if handle is not None:
             meter.cancel_event = handle.cancelled
@@ -410,6 +433,7 @@ class DeepQuery:
         generate_chart: bool,
         user_id: str = "default",
         allow_clarify: bool = False,
+        interactive: bool = False,
     ):
         self.maybe_refresh_schema()  # 建/改表后无需重启即生效（CLI/MCP/服务共用此入口）
         snap = self._snap  # 本次运行全程只用这一份快照
@@ -437,6 +461,7 @@ class DeepQuery:
             "trace": trace,
             "allowed_tables": snap.allowed_tables,
             "allow_clarify": allow_clarify,
+            "interactive": interactive,
         }
         return state, meter, trace, selected_tables, context_used
 
@@ -462,6 +487,7 @@ class DeepQuery:
             selected_tables=selected_tables,
             context_used=context_used,
             hallucination_blocked=final.get("hallucination_blocked", False),
+            numbers_verified=final.get("numbers_verified", 0),
             chart_path=final.get("chart_path"),
             chart_error=final.get("chart_error"),
             clarification=final.get("clarification"),
@@ -541,8 +567,14 @@ class DeepQuery:
             completion_tokens=reply.completion_tokens,
         )
 
-    def _node_generate_sql(self, state: _State) -> _State:
+    def _sql_system(self, state: _State) -> str:
         system = prompts.sql_system(self.db.dialect)
+        if state.get("interactive"):
+            system += prompts.INTERACTIVE_RULES
+        return system
+
+    def _node_generate_sql(self, state: _State) -> _State:
+        system = self._sql_system(state)
         if state.get("allow_clarify"):
             system += prompts.CLARIFY_RULES
         messages = [
@@ -637,7 +669,7 @@ class DeepQuery:
         last = attempts[-1]
         history = "\n\n".join(a.describe(i + 1) for i, a in enumerate(attempts))
         messages = [
-            {"role": "system", "content": prompts.sql_system(self.db.dialect)},
+            {"role": "system", "content": self._sql_system(state)},
             {
                 "role": "user",
                 "content": prompts.SQL_USER_TEMPLATE.format(
@@ -761,7 +793,7 @@ class DeepQuery:
             # 总结失败不影响查询本身的成功：降级为直接给数据预览
             return {"status": "ok", "answer": f"查询成功，结果如下：\n{last_ok.result.preview()}"}
         self._record_generation(state, "answer", messages, reply)
-        answer_text = reply.text.strip()
+        answer_text = plain_answer(reply.text)
 
         if not self.settings.answer_verify:
             return {"status": "ok", "answer": answer_text}
@@ -784,7 +816,7 @@ class DeepQuery:
                     retry_messages, state["meter"], tag="answer_retry", on_delta=on_delta
                 )
                 self._record_generation(state, "answer_retry", retry_messages, retry_reply)
-                retry_text = retry_reply.text.strip()
+                retry_text = plain_answer(retry_reply.text)
                 violations = check_answer(
                     retry_text, last_ok.result, state["question"], last_ok.sql_final or ""
                 )
@@ -803,7 +835,7 @@ class DeepQuery:
                 ),
                 "hallucination_blocked": True,
             }
-        return {"status": "ok", "answer": answer_text}
+        return {"status": "ok", "answer": answer_text, "numbers_verified": checked_number_count(answer_text)}
 
     def _node_fallback(self, state: _State) -> _State:
         """无 LLM 降级收尾：把已知信息如实交代，绝不编造。"""

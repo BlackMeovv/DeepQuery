@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { prettySql, tokenizeSql } from "../lib/sql";
+import { cleanAnswer } from "../lib/text";
 import { nextStepOf, pillOf, useAppStore, type AiMsg } from "../stores/app";
 import DqLogo from "./DqLogo.vue";
 import ResultTable from "./ResultTable.vue";
@@ -41,8 +43,15 @@ const clarifyState = computed(() => {
   return store.pendingClarify?.id === m.id ? "" : "未回答"; // 等待中：选项就在下方面板
 });
 
+const answerText = computed(() => cleanAnswer(props.msg.answer || ""));
+
+// 回答下方的"出处"：数据来自哪几张表、数字是否核对过，一键打开右栏看 SQL
+const showSource = computed(
+  () => (props.msg.status === "done" || props.msg.status === "cached") && !!props.msg.sql,
+);
+
 function copyAnswer() {
-  if (props.msg.answer) navigator.clipboard?.writeText(props.msg.answer);
+  if (answerText.value) navigator.clipboard?.writeText(answerText.value);
 }
 </script>
 
@@ -94,6 +103,7 @@ function copyAnswer() {
         <div class="sbody">
           <div class="slabel">{{ s.label }}</div>
           <div v-if="s.thought" class="sthought">{{ s.thought }}</div>
+          <pre v-if="s.sql" class="ssql mono"><span v-for="(t, j) in tokenizeSql(prettySql(s.sql))" :key="j" :style="{ color: t.c }">{{ t.t }}</span></pre>
           <div v-if="s.err" class="serr mono">{{ s.err }}</div>
         </div>
       </div>
@@ -125,7 +135,21 @@ function copyAnswer() {
       <div v-if="clarifyState" class="cstate">{{ clarifyState }}</div>
     </div>
 
-    <div v-if="msg.answer && msg.status !== 'blocked'" class="answer">{{ msg.answer }}</div>
+    <div v-if="answerText && msg.status !== 'blocked'" class="answer">{{ answerText }}</div>
+
+    <div v-if="showSource" class="source">
+      <span class="srctag">出处</span>
+      <span>查询结果 {{ msg.rowCount }} 行</span>
+      <template v-if="msg.sourceTables?.length">
+        <span class="dotsep">·</span>
+        <span>来自 <span class="mono">{{ msg.sourceTables.join("、") }}</span></span>
+      </template>
+      <template v-if="msg.numbersVerified">
+        <span class="dotsep">·</span>
+        <span class="verified" title="回答里的每个数字都能在查询结果、问题或 SQL 中找到">✓ {{ msg.numbersVerified }} 个数字已核对</span>
+      </template>
+      <span class="srclink" @click="store.panelId = msg.id">查看 SQL ›</span>
+    </div>
 
     <ResultTable v-if="msg.columns && msg.columns.length" :msg="msg" />
 
@@ -180,6 +204,24 @@ function copyAnswer() {
 .btext { font-size: 13.5px; color: var(--ink2); white-space: pre-wrap; }
 .clarify { display: flex; flex-direction: column; gap: 6px; }
 .cstate { font-size: 12.5px; color: var(--accink); }
+.ssql {
+  margin: 6px 0 0; padding: 8px 12px; border-radius: 10px; background: var(--soft);
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  max-height: 150px; overflow: auto;
+}
+.source {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: -4px;
+  font-size: 12.5px; color: var(--ink3);
+}
+.source .mono { font-size: 12px; color: var(--ink2); }
+.srctag {
+  font-size: 11px; font-weight: 600; color: var(--acc2ink); background: var(--acc2bg);
+  border-radius: 999px; padding: 1px 9px; margin-right: 2px;
+}
+.dotsep { opacity: 0.6; }
+.verified { color: var(--acc2ink); }
+.srclink { margin-left: auto; cursor: pointer; color: var(--accink); }
+.srclink:hover { text-decoration: underline; }
 .answer { font-size: 15.5px; line-height: 1.85; color: var(--ink); white-space: pre-wrap; }
 .chart { max-width: 100%; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--paper); }
 .charterr { font-size: 12.5px; color: var(--warn); }
