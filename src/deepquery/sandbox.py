@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .config import Settings
+
+
+# 完整 8 字节 PNG 签名；产物上限 10MB（正常图表几十到几百 KB）
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_MAX_CHART_BYTES = 10 * 1024 * 1024
 
 
 @dataclass
@@ -50,13 +56,40 @@ class BaseSandbox:
         return workdir
 
     def _collect(self, workdir: str, out_dir: str | Path, logs: str) -> SandboxResult:
+        """回收产物。chart.png 由不受信代码写出，回收时同样不能信任：
+
+        不跟随符号链接（否则 os.symlink('/app/.env', 'chart.png') 就能让宿主机
+        把任意文件当作"图表"对外提供）、只接受链接数为 1 的普通文件、校验 PNG
+        签名与大小，最后按字节拷贝到输出目录而不是 move（move 会把链接本身搬过去）。
+        """
         chart = Path(workdir) / "chart.png"
-        if not chart.exists() or chart.stat().st_size == 0:
-            return SandboxResult(ok=False, error="代码执行完成但没有生成 chart.png", logs=logs)
+        missing = SandboxResult(ok=False, error="代码执行完成但没有生成 chart.png", logs=logs)
+        rejected = SandboxResult(
+            ok=False, error="chart.png 不是普通文件（疑似符号链接/硬链接），已拒绝", logs=logs
+        )
+        if chart.is_symlink():  # 无 O_NOFOLLOW 的平台也能挡住
+            return rejected
+        try:
+            fd = os.open(chart, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return missing
+        except OSError:  # ELOOP：打开时才被换成了链接
+            return rejected
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                return rejected
+            payload = fh.read(_MAX_CHART_BYTES + 1)
+        if not payload:
+            return missing
+        if len(payload) > _MAX_CHART_BYTES:
+            return SandboxResult(ok=False, error="chart.png 超过 10MB 上限，已拒绝", logs=logs)
+        if not payload.startswith(_PNG_MAGIC):
+            return SandboxResult(ok=False, error="chart.png 不是合法的 PNG 文件，已拒绝", logs=logs)
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / f"chart-{uuid.uuid4().hex[:12]}.png"
-        shutil.move(str(chart), target)
+        target.write_bytes(payload)
         return SandboxResult(ok=True, chart_path=str(target), logs=logs)
 
 

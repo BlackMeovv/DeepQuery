@@ -10,7 +10,7 @@ FAKE_CHART_CODE = """
 import json
 data = json.load(open("data.json"))
 assert data["columns"] and data["rows"]
-open("chart.png", "wb").write(b"\\x89PNG\\r\\n" + str(len(data["rows"])).encode())
+open("chart.png", "wb").write(b"\\x89PNG\\r\\n\\x1a\\n" + str(len(data["rows"])).encode())
 """
 
 
@@ -32,6 +32,28 @@ class TestSubprocessSandbox:
             "raise RuntimeError('boom')", {"columns": [], "rows": []}, tmp_path
         )
         assert not result.ok and "boom" in result.logs
+
+    def test_symlink_artifact_rejected(self, tmp_path):
+        # 回归：不受信代码把 chart.png 做成指向敏感文件的符号链接，宿主机不得跟随
+        secret = tmp_path / "secret.env"
+        secret.write_text("LLM_API_KEY=sk-should-never-leak")
+        code = f"import os\nos.symlink({str(secret)!r}, 'chart.png')"
+        out = tmp_path / "charts"
+        result = SubprocessSandbox(timeout_seconds=10).run(code, {"columns": [], "rows": []}, out)
+        assert not result.ok and "符号链接" in (result.error or "")
+        assert not out.exists() or not any(out.iterdir())  # 输出目录里什么都没落下
+
+    def test_hardlink_artifact_rejected(self, tmp_path):
+        secret = tmp_path / "secret.env"
+        secret.write_bytes(b"\x89PNG\r\n\x1a\n" + b"LLM_API_KEY=sk-leak")  # 连魔数都伪造了
+        code = f"import os\nos.link({str(secret)!r}, 'chart.png')"
+        result = SubprocessSandbox(timeout_seconds=10).run(code, {"columns": [], "rows": []}, tmp_path / "o")
+        assert not result.ok and "硬链接" in (result.error or "")
+
+    def test_non_png_rejected(self, tmp_path):
+        code = "open('chart.png', 'w').write('LLM_API_KEY=sk-leak')"
+        result = SubprocessSandbox(timeout_seconds=10).run(code, {"columns": [], "rows": []}, tmp_path)
+        assert not result.ok and "PNG" in (result.error or "")
 
     def test_timeout(self, tmp_path):
         result = SubprocessSandbox(timeout_seconds=1).run(

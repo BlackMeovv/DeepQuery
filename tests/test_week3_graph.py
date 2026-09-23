@@ -180,7 +180,8 @@ class TestAllowedTables:
             cfg, db, [sql_reply("SELECT COUNT(*) FROM orders"), sql_reply(GOOD_SQL)]
         )
         assert agent.allowed_tables == {"customers"}
-        assert set(agent._table_docs) == {"customers"}  # schema 注入只含可见表
+        assert "CREATE TABLE customers" in agent.full_schema  # schema 注入只含可见表
+        assert "CREATE TABLE orders" not in agent.full_schema
         outcome = agent.ask("客户数？", generate_answer=False)
         # 第一条 SQL 查了隐藏表 orders：守卫拒绝 → 修复为 customers → 成功
         assert outcome.status == "ok"

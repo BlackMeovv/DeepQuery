@@ -90,6 +90,7 @@ class _State(TypedDict, total=False):
     meter: Any  # UsageMeter（对象通道，就地累加）
     trace: Any  # RunTrace（追踪句柄，未启用时为 no-op）
     on_answer_delta: Any  # 可选回调：回答生成的流式增量（SSE 逐字输出用）
+    allowed_tables: Any  # 本次运行开始时的表白名单快照（运行中 schema 刷新不影响本次）
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -139,8 +140,25 @@ def extract_code(text: str, langs: tuple[str, ...] = ("python", "py")) -> str:
 # 图表代码静态拒绝清单：真正的隔离靠沙箱，这是廉价的第一道筛
 _CHART_CODE_DENY = re.compile(
     r"\b(subprocess|socket|urllib|requests|http\.client|ftplib|ctypes|importlib|"
-    r"__import__|eval\s*\(|exec\s*\(|os\.(system|popen|exec\w*|spawn\w*|remove|unlink|rmdir))"
+    r"__import__|eval\s*\(|exec\s*\(|os\.(system|popen|exec\w*|spawn\w*|remove|unlink|rmdir|symlink|link)|"
+    r"(symlink_to|hardlink_to)\s*\()"
 )
+
+
+@dataclass(frozen=True)
+class _SchemaSnapshot:
+    """一次 schema 自省的完整结果。
+
+    服务端只有一个 agent 实例被并发请求共享：schema 刷新必须整体替换这个引用，
+    而不是逐个改属性——否则并发请求可能读到"新指纹 + 旧表结构"的混合状态，
+    并把这个错配的答案按新指纹写进缓存。
+    """
+
+    fingerprint: str
+    allowed_tables: frozenset
+    table_docs: dict
+    full_schema: str
+    retriever: Any
 
 
 def resolve_allowed_tables(settings: Settings, db) -> set[str]:
@@ -171,8 +189,7 @@ class DeepQuery:
         self.db = db
         self.llm = llm
         self.tracer = tracer or NOOP_TRACER
-        self._schema_fp: str = ""
-        self._load_schema()
+        self._snap: _SchemaSnapshot = self._load_schema()
         self._glossary = load_glossary(settings.glossary_path)
         self._examples = load_examples(settings.examples_path)
         self._sandbox = None  # 图表沙箱按需构建
@@ -181,35 +198,34 @@ class DeepQuery:
     @property
     def allowed_tables(self) -> set[str]:
         """当前实例可见/可查询的表集合（供 server 与 MCP 工具复用同一权限口径）。"""
-        return set(self._allowed_tables)
+        return set(self._snap.allowed_tables)
 
     @property
     def full_schema(self) -> str:
         """权限过滤后的全量 schema 文本。"""
-        return self._full_schema
+        return self._snap.full_schema
 
     @property
     def schema_fingerprint(self) -> str:
         """当前已加载 schema 的版本指纹（服务端把它编入缓存 key）。"""
-        return self._schema_fp
+        return self._snap.fingerprint
 
-    def _load_schema(self) -> None:
-        """自省数据库并重建 schema 上下文。
+    def _load_schema(self) -> _SchemaSnapshot:
+        """自省数据库，构建一份完整的 schema 快照（不修改实例状态）。
 
         表级权限：白名单、schema 注入、RAG 语料同源过滤——模型看不见的表既不会
         出现在 prompt 里，也过不了守卫（纵深的应用层；硬边界在 DB 只读账号）。
         """
         fp = getattr(self.db, "schema_fingerprint", None)
-        self._schema_fp = fp() if callable(fp) else ""
-        self._allowed_tables = resolve_allowed_tables(self.settings, self.db)
-        self._table_docs = {
-            t: doc
-            for t, doc in self.db.schema_by_table().items()
-            if t in self._allowed_tables
-        }
-        self._full_schema = "\n\n".join(self._table_docs.values())
-        self._retriever = SchemaRetriever(
-            self._table_docs, embedder=build_embedder(self.settings)
+        fingerprint = fp() if callable(fp) else ""
+        allowed = frozenset(resolve_allowed_tables(self.settings, self.db))
+        docs = {t: doc for t, doc in self.db.schema_by_table().items() if t in allowed}
+        return _SchemaSnapshot(
+            fingerprint=fingerprint,
+            allowed_tables=allowed,
+            table_docs=docs,
+            full_schema="\n\n".join(docs.values()),
+            retriever=SchemaRetriever(docs, embedder=build_embedder(self.settings)),
         )
 
     def maybe_refresh_schema(self) -> str:
@@ -220,33 +236,34 @@ class DeepQuery:
         """
         fp = getattr(self.db, "schema_fingerprint", None)
         current = fp() if callable(fp) else ""
-        if current != self._schema_fp:
-            self._load_schema()
-        return self._schema_fp
+        if current != self._snap.fingerprint:
+            self._snap = self._load_schema()  # 单次引用赋值：读者要么见旧快照，要么见新快照
+        return self._snap.fingerprint
 
     def _build_schema_context(
-        self, question: str, user_id: str = "default"
+        self, question: str, snap: _SchemaSnapshot, user_id: str = "default"
     ) -> tuple[str, list[str] | None, dict]:
-        """按问题组装 schema 上下文。
+        """按问题组装 schema 上下文（基于调用方传入的同一份快照）。
 
         大库不能全量塞 prompt（贵且触发 Lost in the Middle）——auto 模式按
-        全量 schema 体积决定是否检索选表（装得下就直供；BIRD 消融显示检索在
-        装得下时只亏不赚）；命中的业务字典与相似例句始终附加。
+        全量 schema 体积决定是否检索选表。装得下就直供：BIRD 消融中两者 EX
+        无统计差异，而检索只省约 3% token、却多一处召回失败点；命中的业务字典
+        与相似例句始终附加。
         """
         mode = self.settings.schema_rag
         k = self.settings.schema_rag_top_k
-        full_chars = sum(len(d) for d in self._table_docs.values())
+        full_chars = sum(len(d) for d in snap.table_docs.values())
         use_rag = mode == "on" or (
             mode == "auto"
-            and len(self._table_docs) > k
+            and len(snap.table_docs) > k
             and full_chars > self.settings.schema_rag_auto_max_chars
         )
         if use_rag:
-            selected = self._retriever.top_tables(question, k)
-            context = "\n\n".join(self._table_docs[t] for t in selected)
+            selected = snap.retriever.top_tables(question, k)
+            context = "\n\n".join(snap.table_docs[t] for t in selected)
         else:
             selected = None
-            context = self._full_schema
+            context = snap.full_schema
 
         top_n = self.settings.knowledge_top_n
         glossary_hits = self._glossary.top(question, top_n)
@@ -282,14 +299,16 @@ class DeepQuery:
         """回答一个自然语言问题。generate_answer=False 时跳过总结节点（评测省成本）；
         generate_chart=True 时对成功结果生成图表（模型写代码 → 沙箱执行）。"""
         start = time.monotonic()
-        state, meter, trace, selected_tables = self._prepare_run(
+        state, meter, trace, selected_tables, context_used = self._prepare_run(
             question, generate_answer, generate_chart, user_id
         )
         try:
             final: dict = self._graph.invoke(state, config=self._run_config())
         except GraphRecursionError:
             final = {"attempts": [], "status": "failed", "answer": "内部编排步数超限，已终止。"}
-        return self._finish_run(question, final, meter, trace, selected_tables, start)
+        return self._finish_run(
+            question, final, meter, trace, selected_tables, context_used, start
+        )
 
     def ask_stream(
         self,
@@ -305,7 +324,7 @@ class DeepQuery:
         on_answer_delta：回答文本的逐字增量回调（在 answer 节点的 LLM 调用中触发）。
         """
         start = time.monotonic()
-        state, meter, trace, selected_tables = self._prepare_run(
+        state, meter, trace, selected_tables, context_used = self._prepare_run(
             question, generate_answer, generate_chart, user_id
         )
         if on_answer_delta is not None:
@@ -319,7 +338,9 @@ class DeepQuery:
                     yield ("node", node, delta or {})
         except GraphRecursionError:
             final_state.update({"status": "failed", "answer": "内部编排步数超限，已终止。"})
-        outcome = self._finish_run(question, final_state, meter, trace, selected_tables, start)
+        outcome = self._finish_run(
+            question, final_state, meter, trace, selected_tables, context_used, start
+        )
         yield ("final", outcome, None)
 
     # ---------- run plumbing ----------
@@ -332,6 +353,7 @@ class DeepQuery:
         self, question: str, generate_answer: bool, generate_chart: bool, user_id: str = "default"
     ):
         self.maybe_refresh_schema()  # 建/改表后无需重启即生效（CLI/MCP/服务共用此入口）
+        snap = self._snap  # 本次运行全程只用这一份快照
         meter = UsageMeter(
             price_input_per_m=self.settings.llm_price_input_per_m,
             price_output_per_m=self.settings.llm_price_output_per_m,
@@ -340,9 +362,10 @@ class DeepQuery:
         )
         trace = self.tracer.start_run(question)
         schema_context, selected_tables, context_used = self._build_schema_context(
-            question, user_id=user_id
+            question, snap, user_id=user_id
         )
-        self._last_context_used = context_used
+        # context_used 含用户私有记忆原文：只能随本次运行传递，绝不能挂在共享的
+        # agent 实例上——并发请求会互相覆盖，把 A 的记忆吐给 B 并写进缓存
         if selected_tables is not None:
             trace.span("schema_rag", metadata={"selected_tables": selected_tables})
         state: _State = {
@@ -353,8 +376,9 @@ class DeepQuery:
             "generate_chart": generate_chart,
             "meter": meter,
             "trace": trace,
+            "allowed_tables": snap.allowed_tables,
         }
-        return state, meter, trace, selected_tables
+        return state, meter, trace, selected_tables, context_used
 
     def _finish_run(
         self,
@@ -363,6 +387,7 @@ class DeepQuery:
         meter: UsageMeter,
         trace: RunTrace,
         selected_tables: list[str] | None,
+        context_used: dict | None,
         start: float,
     ) -> RunOutcome:
         attempts: list[Attempt] = final.get("attempts", [])
@@ -375,7 +400,7 @@ class DeepQuery:
             final_sql=executed_sql,
             predicted_sql=raw_sql,
             selected_tables=selected_tables,
-            context_used=getattr(self, "_last_context_used", None),
+            context_used=context_used,
             hallucination_blocked=final.get("hallucination_blocked", False),
             chart_path=final.get("chart_path"),
             chart_error=final.get("chart_error"),
@@ -472,7 +497,7 @@ class DeepQuery:
         sql_raw = state.get("candidate_sql", "")
         verdict = validate(
             sql_raw,
-            allowed_tables=self._allowed_tables,
+            allowed_tables=state.get("allowed_tables", self._snap.allowed_tables),
             max_rows=self.settings.sql_max_rows,
             dialect=self.db.dialect,
         )

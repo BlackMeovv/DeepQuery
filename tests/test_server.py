@@ -1,6 +1,7 @@
 """FastAPI 服务测试：SSE 流、缓存、指标、图表文件安全。全离线（MockLLM）。"""
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -104,6 +105,16 @@ class TestChartFiles:
     def test_path_traversal_rejected(self, client):
         assert client.get("/charts/..%2f..%2fetc%2fpasswd").status_code == 404
         assert client.get("/charts/evil.png").status_code == 404
+
+    def test_symlink_in_chart_dir_not_served(self, client, settings, tmp_path):
+        import os
+
+        secret = tmp_path / "secret.env"
+        secret.write_text("LLM_API_KEY=sk-leak")
+        out = Path(settings.chart_out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        os.symlink(secret, out / "chart-0123456789ab.png")
+        assert client.get("/charts/chart-0123456789ab.png").status_code == 404
 
     def test_missing_chart_404(self, client):
         assert client.get("/charts/chart-000000000000.png").status_code == 404

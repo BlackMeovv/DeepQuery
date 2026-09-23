@@ -223,10 +223,12 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
 
     @app.get("/charts/{name}")
     def chart_file(name: str):
-        if not _CHART_NAME.match(name):  # 防路径穿越：只放行沙箱命名的文件
+        # 文件名是 48 位随机数（能力 URL），不额外要求口令——<img> 无法携带 code。
+        # 防路径穿越只放行沙箱命名；再拒绝符号链接与非普通文件，兜住输出目录被污染的情况
+        if not _CHART_NAME.match(name):
             raise HTTPException(status_code=404)
         path = Path(settings.chart_out_dir) / name
-        if not path.exists():
+        if path.is_symlink() or not path.is_file():
             raise HTTPException(status_code=404)
         return FileResponse(path, media_type="image/png")
 

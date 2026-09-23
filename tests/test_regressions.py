@@ -181,3 +181,45 @@ class TestRunnerAbortOnApiOutage:
         assert summary["ex_accuracy"] == 0.0
         # 没跑到的题不应让报告崩溃（无 last、空延迟列表）
         assert len(report["results"]) == 12
+
+
+class TestConcurrentRunIsolation:
+    """回归：共享的 agent 实例被并发请求使用时，本次注入的上下文（含用户私有
+    记忆原文）不能串到别的请求里——此前它挂在实例属性上，后开始的请求会覆盖
+    先开始的，A 的回答里带出 B 的记忆，并随结果写进缓存。"""
+
+    def test_private_memories_do_not_leak_across_concurrent_runs(self, settings, db, tmp_path):
+        import threading
+
+        from deepquery.memory import MemoryStore
+
+        memory = MemoryStore(tmp_path / "mem.sqlite")
+        memory.remember("alice", "上海客户数口径：只算钻石会员（alice 私有）")
+        memory.remember("bob", "上海客户数口径：包含注销账户（bob 私有）")
+
+        barrier = threading.Barrier(2, timeout=10)
+
+        class BarrierLLM(MockLLM):
+            def chat(self, messages, meter, tag="", on_delta=None):
+                if tag == "generate_sql":
+                    barrier.wait()  # 两个运行都已完成上下文组装，才允许任一继续
+                return super().chat(messages, meter, tag=tag, on_delta=on_delta)
+
+        llm = BarrierLLM(["```sql\nSELECT COUNT(*) FROM customers WHERE city = '上海'\n```"], cycle=True)
+        agent = DeepQuery(settings, db, llm, memory=memory)
+
+        outcomes: dict = {}
+
+        def run(user):
+            outcomes[user] = agent.ask("上海客户数口径下有多少？", generate_answer=False, user_id=user)
+
+        threads = [threading.Thread(target=run, args=(u,)) for u in ("alice", "bob")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+
+        alice = outcomes["alice"].context_used["memories"]
+        bob = outcomes["bob"].context_used["memories"]
+        assert alice and all("alice" in m for m in alice)
+        assert bob and all("bob" in m for m in bob)
