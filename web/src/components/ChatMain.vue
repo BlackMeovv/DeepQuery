@@ -8,13 +8,8 @@ import Composer from "./Composer.vue";
 const store = useAppStore();
 const scroller = ref<HTMLElement | null>(null);
 
-// 后两条故意问得模糊 / 超出数据范围，用来体验 Agent 先向你确认
-const SAMPLES = [
-  { q: "各品类的成交金额分别是多少？" },
-  { q: "下单次数最多的前5名客户是谁？" },
-  { q: "哪个客户最好？", tag: "会先问你口径" },
-  { q: "各城市的退货率是多少？", tag: "库里没有退货数据" },
-];
+// 示例问题由后端按数据集提供；带标签的几条故意问得模糊 / 超出数据范围，用来体验 Agent 先向你确认
+const samples = computed(() => store.env?.samples ?? []);
 
 const greetHead = computed(() => {
   const h = new Date().getHours();
@@ -63,11 +58,14 @@ watch(() => store.pendingClarify?.id, toBottom);
           <div class="gsub">
             已连接 <span class="mono">{{ store.env?.db || "…" }}</span> · 每个回答都可追溯到 SQL
           </div>
-          <div v-if="store.env?.dataset_note" class="dnote">{{ store.env.dataset_note }}</div>
+          <div v-if="store.env?.dataset_note" class="dnote">
+            {{ store.env.dataset_note }}
+            <span v-if="store.env.dataset_source" class="dsrc">数据来源：{{ store.env.dataset_source }}</span>
+          </div>
           <Composer placeholder="问一个关于数据的问题…" :elevated="true" />
-          <div class="samples">
+          <div v-if="samples.length" class="samples">
             <div class="slabel">可以先试试</div>
-            <div v-for="(s, i) in SAMPLES" :key="s.q" class="sample" @click="store.ask(s.q)">
+            <div v-for="(s, i) in samples" :key="s.q" class="sample" @click="store.ask(s.q)">
               <span class="snum serif">{{ i + 1 }}</span>
               <span class="stext">{{ s.q }}</span>
               <span v-if="s.tag" class="stag">{{ s.tag }}</span>
@@ -139,6 +137,7 @@ watch(() => store.pendingClarify?.id, toBottom);
 .sample:hover { background: var(--accbg); }
 .snum { width: 30px; height: 30px; flex: none; border-radius: 50%; background: var(--acc2bg); color: var(--acc2deep); display: flex; align-items: center; justify-content: center; font-size: 13px; }
 .stext { font-size: 14.5px; color: var(--ink); }
+.dsrc { display: block; font-size: 11.5px; color: var(--ink3); margin-top: 2px; }
 .stag { font-size: 11.5px; color: var(--accink); background: var(--accbg); border-radius: 999px; padding: 2px 10px; flex: none; }
 .sarrow { margin-left: auto; color: var(--acc); font-size: 15px; }
 

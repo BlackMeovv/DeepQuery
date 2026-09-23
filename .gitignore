@@ -12,6 +12,7 @@ build/
 
 # data & artifacts (generated)
 data/demo/*.sqlite
+data/olist/
 data/charts/
 data/memory.sqlite
 # eval/results 有意纳入版本管理：评测报告是"数字可复现"的证据

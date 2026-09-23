@@ -1,0 +1,14 @@
+# Olist 数据集的业务口径（jsonl，每行 {"term", "definition"}）。按问题检索 top-n 注入 prompt。
+{"term": "销售额 / 成交额 / GMV / 营收", "definition": "商品成交额：SUM(order_items.price)，不含运费 freight；排除已取消和缺货的订单：orders.status NOT IN ('canceled', 'unavailable')。金额单位是巴西雷亚尔"}
+{"term": "支付金额 / 实付金额", "definition": "买家实际支付的钱：SUM(payments.amount)，包含运费；一个订单可能有多笔支付，按订单汇总时先 GROUP BY order_id"}
+{"term": "运费", "definition": "SUM(order_items.freight)，按商品件数分摊在每一行明细上"}
+{"term": "订单数 / 订单量", "definition": "COUNT(DISTINCT orders.id)。按月份统计时用下单时间：strftime('%Y-%m', orders.purchased_at)"}
+{"term": "客户数 / 买家数 / 用户数", "definition": "COUNT(DISTINCT customers.unique_id)。customers.id 是订单级 ID（每个订单一个），直接数 id 会把回头客算成多个人"}
+{"term": "复购 / 回头客 / 复购率", "definition": "同一个 customers.unique_id 有 2 个及以上订单即为复购客户；复购率 = 复购客户数 / 客户总数（都按 unique_id 去重）"}
+{"term": "客单价", "definition": "销售额 / 订单数：SUM(order_items.price) / COUNT(DISTINCT order_items.order_id)，同样排除 canceled 和 unavailable 订单"}
+{"term": "送达天数 / 配送时长 / 物流时效", "definition": "julianday(orders.delivered_at) - julianday(orders.purchased_at)，只统计 delivered_at 不为空的订单"}
+{"term": "延迟送达 / 逾期 / 晚到", "definition": "date(orders.delivered_at) > date(orders.estimated_delivery_at)，即签收日期晚于平台承诺的送达日期；只看已送达的订单"}
+{"term": "评分 / 好评 / 差评 / 满意度", "definition": "reviews.score 为 1–5 星；好评指 score >= 4，差评指 score <= 2；平均评分用 AVG(reviews.score)"}
+{"term": "品类", "definition": "products.category 关联 categories.name；展示品类时用中文名 categories.name_zh。按品类统计评分时，用 order_items 连接 reviews（reviews.order_id = order_items.order_id）"}
+{"term": "州 / 地区 / 大区", "definition": "客户所在州是 customers.state，卖家所在州是 sellers.state，都关联 states.code；展示时用 states.name_zh，东南部、东北部等大区用 states.region_zh"}
+{"term": "卖家 / 商家", "definition": "sellers 表；卖家的销量和销售额通过 order_items.seller_id 统计。卖家没有名称，只能用 id 和所在城市标识"}

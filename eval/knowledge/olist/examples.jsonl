@@ -1,0 +1,4 @@
+# Olist 数据集的 few-shot 例句（jsonl，每行 {"question", "sql"}）：覆盖容易写错的几种关联方式。
+{"question": "每个州有多少位客户？", "sql": "SELECT s.name_zh AS 州, COUNT(DISTINCT c.unique_id) AS 客户数 FROM customers c JOIN states s ON s.code = c.state GROUP BY s.code ORDER BY 客户数 DESC"}
+{"question": "延迟送达的订单平均评分是多少？", "sql": "SELECT ROUND(AVG(r.score), 2) AS 平均评分, COUNT(*) AS 评价数 FROM orders o JOIN reviews r ON r.order_id = o.id WHERE o.delivered_at IS NOT NULL AND date(o.delivered_at) > date(o.estimated_delivery_at)"}
+{"question": "各大区的平均送达天数", "sql": "SELECT s.region_zh AS 大区, ROUND(AVG(julianday(o.delivered_at) - julianday(o.purchased_at)), 1) AS 平均送达天数 FROM orders o JOIN customers c ON c.id = o.customer_id JOIN states s ON s.code = c.state WHERE o.delivered_at IS NOT NULL GROUP BY s.region_zh ORDER BY 平均送达天数 DESC"}

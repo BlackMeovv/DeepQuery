@@ -26,5 +26,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install matplotlib
 
 EXPOSE 8000
-# 启动前确保演示库存在
-CMD ["sh", "-c", "test -f \"${DB_PATH:-data/demo/ecommerce.sqlite}\" || uv run python -m deepquery.demo_data; uv run deepquery serve"]
+# 启动前确保 DB_PATH 指向的库存在：演示库现场生成，Olist 首次启动时从 Kaggle 下载并导入
+CMD ["sh", "-c", "uv run python -m deepquery.datasets ensure; uv run deepquery serve"]

@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     # BIRD 150 题消融：装得下时全量直供与检索选表的配对差异不显著，而检索只省 ~3% token、
     # 多一个召回失败点——所以按体积而非表数决定
     schema_rag_auto_max_chars: int = 16000
-    # 业务字典 / few-shot 例句（jsonl，选填；路径不存在则自动跳过）
+    # 业务字典 / few-shot 例句（jsonl，选填；路径不存在则自动跳过）。
+    # 保持默认值时跟随数据集：Olist 库自动改用 eval/knowledge/olist/ 下的口径
     glossary_path: str = "eval/knowledge/glossary.jsonl"
     examples_path: str = "eval/knowledge/examples.jsonl"
     knowledge_top_n: int = 3

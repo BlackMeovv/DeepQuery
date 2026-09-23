@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Str
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 
+from . import datasets
 from .agent import DeepQuery, RunOutcome
 from .cache import BaseCache, build_cache, cache_key
 from .config import Settings, get_settings
@@ -181,13 +182,11 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         require_code(code)
         return {"ok": True}
 
-    def dataset_note() -> str:
-        if settings.dataset_note:
-            return settings.dataset_note
-        from .demo_data import DEFAULT_PATH, DESCRIPTION
-
-        is_demo = "://" not in settings.db_path and Path(settings.db_path).name == DEFAULT_PATH.name
-        return DESCRIPTION if is_demo else ""
+    # 内置数据集（演示库 / Olist）自带首页说明与示例问题；DATASET_NOTE 可覆盖说明
+    dataset = datasets.for_db(settings.db_path)
+    dataset_note = settings.dataset_note or (dataset.description if dataset else "")
+    samples = list(dataset.samples) if dataset else []
+    dataset_source = dataset.source if dataset else ""
 
     @app.get("/healthz")
     def healthz():
@@ -204,7 +203,9 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             "db": db_target,
             "model": "mock" if settings.llm_mock else settings.llm_model,
             "protected": bool(settings.demo_access_code),
-            "dataset_note": dataset_note(),
+            "dataset_note": dataset_note,
+            "dataset_source": dataset_source,
+            "samples": samples,
         }
 
     @app.get("/metrics")

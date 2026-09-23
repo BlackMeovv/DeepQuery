@@ -15,7 +15,6 @@ services:
       REDIS_URL: redis://redis:6379/0
       # 容器内用 subprocess 执行图表代码：app 容器本身就是隔离边界
       CHART_EXECUTOR: subprocess
-      DB_PATH: data/demo/ecommerce.sqlite
     volumes:
       - app-data:/app/data
     depends_on:

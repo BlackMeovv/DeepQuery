@@ -53,8 +53,11 @@ export interface EnvInfo {
   db: string;
   model: string;
   protected?: boolean;
-  /** 数据说明：告诉访客这份数据是什么（演示库自动提供） */
+  /** 数据说明：告诉访客这份数据是什么（内置数据集自动提供） */
   dataset_note?: string;
+  dataset_source?: string; // 数据来源与许可（真实数据集才有）
+  /** 首页示例问题，随数据集切换；tag 是可选的小标签 */
+  samples?: { q: string; tag?: string }[];
 }
 
 export interface SchemaColumn { name: string; type: string }

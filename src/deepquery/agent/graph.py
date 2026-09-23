@@ -26,6 +26,7 @@ from langgraph.graph import END, StateGraph
 
 from ..budget import BudgetExceeded, UsageMeter
 from ..config import Settings
+from ..datasets import knowledge_paths
 from ..guard import validate
 from ..llm import BaseLLM, LLMError
 from ..retrieval import SchemaRetriever, build_embedder, load_examples, load_glossary
@@ -221,8 +222,9 @@ class DeepQuery:
         self.llm = llm
         self.tracer = tracer or NOOP_TRACER
         self._snap: _SchemaSnapshot = self._load_schema()
-        self._glossary = load_glossary(settings.glossary_path)
-        self._examples = load_examples(settings.examples_path)
+        glossary_path, examples_path = knowledge_paths(settings)  # 内置数据集自带各自的口径
+        self._glossary = load_glossary(glossary_path)
+        self._examples = load_examples(examples_path)
         self._sandbox = None  # 图表沙箱按需构建
         self._graph = self._build_graph()
 

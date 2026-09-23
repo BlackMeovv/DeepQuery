@@ -134,6 +134,7 @@ Requires [uv](https://docs.astral.sh/uv/) and any OpenAI-compatible model API.
 make install
 cp .env.example .env          # set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 make demo-db                  # fictional e-commerce data: 240 customers, 36 products, 1,500 orders
+make olist-db                 # optional: real Olist Brazilian e-commerce data (~100k orders); point DB_PATH at it
 make ask Q="Which 5 customers placed the most orders?"
 make serve                    # web UI at http://localhost:8000
 make test                     # 280+ offline tests, no API key needed

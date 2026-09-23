@@ -1,10 +1,13 @@
-.PHONY: install demo-db test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
+.PHONY: install demo-db olist-db test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
 
 install:            ## 安装依赖（含 dev）
 	uv sync --extra dev
 
 demo-db:            ## 生成确定性演示库
 	uv run python -m deepquery.demo_data
+
+olist-db:           ## 下载 Olist 巴西电商真实数据并导入 data/olist/olist.sqlite（约 45MB）
+	uv run python -m deepquery.datasets build olist
 
 test:               ## 离线测试（不需要 API Key）
 	uv run pytest

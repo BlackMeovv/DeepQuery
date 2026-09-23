@@ -53,7 +53,9 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 ```json
 { "ok": true, "cache": "memory|redis", "mock": false, "db": "ecommerce.sqlite", "model": "deepseek-chat",
   "protected": false,                       // true=开启了访问口令
-  "dataset_note": "一家虚构电商……" }         // 空状态展示的数据说明，可能为空串
+  "dataset_note": "一家虚构电商……",         // 空状态展示的数据说明，可能为空串
+  "dataset_source": "",                      // 数据来源与许可（真实数据集才有）
+  "samples": [ { "q": "哪个客户最好？", "tag": "会先问你口径" } ] }  // 首页示例问题，随数据集切换；自有库为空
 ```
 
 ### 2. `GET /api/schema` — 库表结构（左栏树）
