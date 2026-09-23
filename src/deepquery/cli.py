@@ -38,6 +38,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         generate_answer=not args.no_answer,
         generate_chart=args.chart,
         user_id=args.user,
+        allow_clarify=True,
     )
 
     # 模型/数据库产出的文本都是不受信内容，必须 escape/Text 后再交给 rich 渲染
@@ -57,7 +58,12 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         console.print(table)
         if outcome.result.row_count > 20:
             console.print(f"（共 {outcome.result.row_count} 行，仅展示前 20 行）")
-    if outcome.answer:
+    if outcome.clarification:
+        c = outcome.clarification
+        lines = [c["question"], ""] + [f"  {i}. {o}" for i, o in enumerate(c["options"], 1)]
+        lines += ["", "在问题后补充说明重新提问，例如：", f'  deepquery ask "{args.question}（补充说明：{c["options"][0] if c["options"] else "……"}）"']
+        console.print(Panel(Text("\n".join(lines)), title="需要向你确认", border_style="yellow"))
+    elif outcome.answer:
         console.print(Panel(Text(outcome.answer), title="回答", border_style="green"))
     if outcome.chart_path:
         console.print(f"图表已生成: [cyan]{escape(outcome.chart_path)}[/cyan]")

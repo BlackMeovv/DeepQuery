@@ -208,13 +208,18 @@ class TestPublicDemoGuards:
             assert c.post("/api/memory", json={"note": "别的访客", "user": "v2"}).status_code == 200
 
     def test_proxy_header_only_trusted_when_enabled(self, settings, db):
-        ask = lambda c, ip: final_of(c.get("/api/ask", params={"question": "客户数？"}, headers={"X-Real-IP": ip}))
+        def ask(c, ip):
+            return final_of(c.get("/api/ask", params={"question": "客户数？"}, headers={"X-Real-IP": ip}))
+
         trusted, _ = guarded_client(settings, db, rate_limit_per_minute=1, trust_proxy_headers=True)
         with trusted:
             assert ask(trusted, "1.1.1.1")["status"] == "ok"
             assert ask(trusted, "2.2.2.2")["status"] == "ok"  # 不同访客各自计数
             assert "频繁" in ask(trusted, "1.1.1.1")["answer"]
-        xff = lambda c, v: final_of(c.get("/api/ask", params={"question": "客户数？"}, headers={"X-Forwarded-For": v}))
+
+        def xff(c, v):
+            return final_of(c.get("/api/ask", params={"question": "客户数？"}, headers={"X-Forwarded-For": v}))
+
         chain, _ = guarded_client(settings, db, rate_limit_per_minute=1, trust_proxy_headers=True)
         with chain:
             assert xff(chain, "6.6.6.6, 3.3.3.3")["status"] == "ok"

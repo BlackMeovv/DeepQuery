@@ -14,6 +14,12 @@ from pathlib import Path
 SEED = 42
 DEFAULT_PATH = Path("data/demo/ecommerce.sqlite")
 
+# 给访客看的数据说明（网页空状态展示）。数字由 tests/test_demo_description.py 对照实际生成的库校验
+DESCRIPTION = (
+    "一家虚构电商 2024 年 1 月至 2025 年 6 月的经营数据：240 位客户分布在 10 个城市，"
+    "6 个品类共 36 个商品，1500 笔订单及其明细与支付记录。"
+)
+
 _CITIES = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安", "南京", "重庆"]
 _CATEGORIES = ["手机数码", "家用电器", "服饰鞋包", "美妆个护", "食品生鲜", "图书文娱"]
 _PRODUCT_WORDS = {

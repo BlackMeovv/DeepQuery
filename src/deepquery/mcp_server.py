@@ -38,10 +38,13 @@ def _get_agent():
 
 def ask_data(question: str, user: str = "default") -> dict[str, Any]:
     """用自然语言查询业务数据库。返回回答、SQL 与结果预览。"""
-    outcome = _get_agent().ask(question, user_id=user)
+    outcome = _get_agent().ask(question, user_id=user, allow_clarify=True)
     return {
         "status": outcome.status,
         "answer": outcome.answer,
+        # status=needs_clarification 时：请把 question 和 options 转述给用户，
+        # 拿到回答后把补充说明拼进问题里再调用一次
+        "clarification": outcome.clarification,
         "sql": outcome.final_sql,
         "result_preview": outcome.result.preview(max_rows=20) if outcome.result else None,
         "usage": outcome.usage,

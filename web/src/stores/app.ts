@@ -9,13 +9,14 @@ import {
   ping,
   setAccessCode,
   useVisitorId,
+  type Clarification,
   type EnvInfo,
   type FinalPayload,
   type MemoryNote,
   type SchemaTable,
 } from "../lib/api";
 
-export type MsgStatus = "running" | "done" | "blocked" | "cached" | "stopped" | "failed";
+export type MsgStatus = "running" | "done" | "blocked" | "cached" | "stopped" | "failed" | "clarify";
 
 export interface Step {
   label: string;
@@ -46,6 +47,10 @@ export interface AiMsg {
   selectedTables?: string[] | null;
   contextUsed?: { glossary: string[]; examples: string[]; memories: string[] } | null;
   chart?: boolean; // 本次提问是否请求了图表
+  clarification?: Clarification | null; // Agent 拿不准时向用户提的确认
+  clarifyAnswered?: string; // 用户对这次确认给出的回答
+  noClarify?: boolean; // 这是回答确认后的追问：不再允许反问（重跑时沿用）
+  clarifySkipped?: boolean; // 用户选择跳过确认、改问别的
 }
 
 export type Msg = UserMsg | AiMsg;
@@ -59,7 +64,14 @@ const NODE_LABELS: Record<string, string> = {
   chart: "生成图表",
   summarize: "归纳回答",
   fallback: "降级收尾",
+  clarify: "需要向你确认",
 };
+
+interface AskOptions {
+  fresh?: boolean; // 跳过缓存强制重跑
+  display?: string; // 对话里显示的用户消息（默认就是问题本身）
+  clarify?: boolean; // 是否允许 Agent 先反问确认（默认允许）
+}
 
 const CONVOS_KEY = "ia2_convos";
 const THEME_KEY = "ia2_theme";
@@ -96,6 +108,11 @@ export const useAppStore = defineStore("app", {
     lastAiId(state): string | null {
       const m = [...state.msgs].reverse().find((x) => x.role === "ai");
       return m ? m.id : null;
+    },
+    /** 最近一条回答是否正在等用户确认（输入框据此把输入当作回答） */
+    pendingClarify(state): AiMsg | null {
+      const last = state.msgs[state.msgs.length - 1];
+      return last?.role === "ai" && last.status === "clarify" && !last.clarifyAnswered && !last.clarifySkipped ? last : null;
     },
     title(state): string {
       const c = state.convos.find((x) => x.id === state.curConvo);
@@ -195,9 +212,10 @@ export const useAppStore = defineStore("app", {
     },
 
     // ---- 提问主流程 ----
-    ask(question: string, fresh = false) {
+    ask(question: string, opts: AskOptions = {}) {
       const q = question.trim();
       if (!q || this.running) return;
+      const clarify = opts.clarify ?? true;
 
       if (!this.curConvo) {
         const convo: Convo = { id: String(Date.now()), title: q.slice(0, 16), msgs: [] };
@@ -206,8 +224,8 @@ export const useAppStore = defineStore("app", {
       }
 
       const aiId = "a" + Date.now();
-      const ai: AiMsg = { id: aiId, role: "ai", q, status: "running", steps: [], chart: this.chartOn };
-      this.msgs.push({ id: "u" + Date.now(), role: "user", text: q });
+      const ai: AiMsg = { id: aiId, role: "ai", q, status: "running", steps: [], chart: this.chartOn, noClarify: !clarify };
+      this.msgs.push({ id: "u" + Date.now(), role: "user", text: opts.display?.trim() || q });
       this.msgs.push(ai);
       this.draft = "";
       this.running = true;
@@ -234,10 +252,15 @@ export const useAppStore = defineStore("app", {
           });
         },
         onFinal: (p: FinalPayload) => {
+          const needsClarify = p.status === "needs_clarification" && !!p.clarification;
           patch({
-            status: p.cached ? "cached" : p.hallucination_blocked ? "blocked" : p.status.startsWith("ok") ? "done" : "failed",
+            status: needsClarify ? "clarify"
+              : p.cached ? "cached"
+              : p.hallucination_blocked ? "blocked"
+              : p.status.startsWith("ok") ? "done" : "failed",
+            clarification: needsClarify ? p.clarification : null,
             sql: p.sql,
-            answer: p.hallucination_blocked ? undefined : p.answer,
+            answer: p.hallucination_blocked || needsClarify ? undefined : p.answer,
             blockedText: p.hallucination_blocked ? p.answer : undefined,
             columns: p.columns,
             rows: p.rows,
@@ -262,7 +285,36 @@ export const useAppStore = defineStore("app", {
           this.stream = null;
           this.persist();
         },
-      }, undefined, fresh);
+      }, undefined, opts.fresh ?? false, clarify);
+    },
+
+    /**
+     * 回答 Agent 的确认。口径类（有口径词）：把回答作为补充说明拼回原问题再问一次，
+     * 可选地存为记忆，以后同样的说法不再反问；数据缺失类：选项本身就是可回答的新问法，直接问。
+     * 追问一律关闭反问，避免来回拉扯。
+     */
+    async answerClarification(msgId: string, choice: string, remember = false) {
+      const text = choice.trim();
+      const m = this.msgs.find((x) => x.id === msgId) as AiMsg | undefined;
+      if (!text || !m?.clarification || m.clarifyAnswered || m.clarifySkipped || this.running) return;
+      m.clarifyAnswered = text;
+      const term = m.clarification.term;
+      if (remember && term) await this.addMem(`「${term}」指：${text}`);
+      const question = term ? `${m.q}（补充说明：「${term}」指${text}）` : text;
+      this.ask(question, { display: text, clarify: false });
+    },
+
+    /** 输入框发送：若最近一条回答在等待确认，把输入当作对确认的回答 */
+    skipClarification(msgId: string) {
+      const m = this.msgs.find((x) => x.id === msgId) as AiMsg | undefined;
+      if (m?.status === "clarify") m.clarifySkipped = true;
+      this.persist();
+    },
+
+    submit(text: string) {
+      const pending = this.pendingClarify;
+      if (pending) this.answerClarification(pending.id, text);
+      else this.ask(text);
     },
 
     stop() {
@@ -304,5 +356,6 @@ export function pillOf(status: MsgStatus) {
     cached: { t: "运行过程", i: "≡", c: "var(--accink)", bg: "var(--accbg)" },
     stopped: { t: "已停止", i: "×", c: "var(--warn)", bg: "var(--warnbg)" },
     failed: { t: "未完成", i: "×", c: "var(--err)", bg: "var(--errbg)" },
+    clarify: { t: "需要确认", i: "?", c: "var(--accink)", bg: "var(--accbg)" },
   }[status];
 }

@@ -53,6 +53,8 @@ export interface EnvInfo {
   db: string;
   model: string;
   protected?: boolean;
+  /** 数据说明：告诉访客这份数据是什么（演示库自动提供） */
+  dataset_note?: string;
 }
 
 export interface SchemaColumn { name: string; type: string }
@@ -82,8 +84,15 @@ export interface Attempt {
   error_message?: string | null;
 }
 
+/** Agent 拿不准时先向用户确认：question 是要问的话，options 是可选的理解（可能为空） */
+export interface Clarification {
+  question: string;
+  term: string; // 需要确认的口径词，如"最好的客户"；数据缺失类确认时为空
+  options: string[];
+}
+
 export interface FinalPayload {
-  status: "ok" | "ok_empty" | "failed" | "budget_exceeded";
+  status: "ok" | "ok_empty" | "failed" | "budget_exceeded" | "needs_clarification";
   cached: boolean;
   answer: string;
   sql: string | null;
@@ -97,6 +106,7 @@ export interface FinalPayload {
   hallucination_blocked: boolean;
   chart_url: string | null;
   chart_error: string | null;
+  clarification?: Clarification | null;
   usage: Usage;
   latency_ms: number;
 }
@@ -145,11 +155,12 @@ export function askStream(
   callbacks: AskCallbacks,
   user = userId,
   fresh = false,
+  clarify = true, // 回答过澄清的追问传 false，避免 Agent 反复追问
 ): EventSource {
   const url =
     `/api/ask?question=${encodeURIComponent(question)}` +
     `&chart=${chart ? 1 : 0}&user=${encodeURIComponent(user)}` +
-    `${fresh ? "&fresh=1" : ""}${codeQS()}`;
+    `${fresh ? "&fresh=1" : ""}${clarify ? "" : "&clarify=0"}${codeQS()}`;
   const es = new EventSource(url);
   es.addEventListener("node", (e) => callbacks.onNode(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("delta", (e) => callbacks.onDelta?.(JSON.parse((e as MessageEvent).data).text));

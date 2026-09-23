@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     schema_rag: str = "auto"
     schema_rag_top_k: int = 6
     # auto 模式启用检索的阈值：全量 schema 字符数超过它才检索选表。
-    # BIRD 150 题消融实测：装得下时全量直供 64.7% vs 检索 61.3%（召回缺口即失分），
-    # 且检索只省 ~3% token——所以按体积而非表数决定
+    # BIRD 150 题消融：装得下时全量直供与检索选表的配对差异不显著，而检索只省 ~3% token、
+    # 多一个召回失败点——所以按体积而非表数决定
     schema_rag_auto_max_chars: int = 16000
     # 业务字典 / few-shot 例句（jsonl，选填；路径不存在则自动跳过）
     glossary_path: str = "eval/knowledge/glossary.jsonl"
@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     # 全站每日模型花费上限（与 LLM_PRICE_* 同币种），超出后只返回已缓存的答案
     rate_limit_per_minute: int = 0
     daily_cost_limit: float = 0.0
+    # 网页空状态展示的数据说明（告诉访客这份数据是什么）；为空时演示库自动使用内置说明
+    dataset_note: str = ""
     # 部署在 nginx 等反向代理之后时开启：用 X-Real-IP 区分访客。
     # 只有应用端口不对外暴露时才安全，否则访客可以伪造这个请求头
     trust_proxy_headers: bool = False

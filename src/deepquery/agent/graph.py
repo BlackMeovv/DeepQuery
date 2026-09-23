@@ -53,7 +53,7 @@ class Attempt:
 @dataclass
 class RunOutcome:
     question: str
-    status: str  # ok / ok_empty / failed / budget_exceeded
+    status: str  # ok / ok_empty / failed / budget_exceeded / needs_clarification
     answer: str = ""
     final_sql: str | None = None  # 实际执行的 SQL（守卫改写后，含注入的 LIMIT）
     predicted_sql: str | None = None  # 模型原始 SQL（评测打分用）
@@ -62,6 +62,7 @@ class RunOutcome:
     hallucination_blocked: bool = False  # 回答因数字无出处被拦截降级
     chart_path: str | None = None  # 沙箱生成的图表文件（未请求/失败时为 None）
     chart_error: str | None = None
+    clarification: dict | None = None  # 需要向用户确认时：{question, term, options}
     result: QueryResult | None = None
     attempts: list[Attempt] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
@@ -91,6 +92,8 @@ class _State(TypedDict, total=False):
     trace: Any  # RunTrace（追踪句柄，未启用时为 no-op）
     on_answer_delta: Any  # 可选回调：回答生成的流式增量（SSE 逐字输出用）
     allowed_tables: Any  # 本次运行开始时的表白名单快照（运行中 schema 刷新不影响本次）
+    allow_clarify: bool  # 交互模式：允许模型先向用户确认（评测时关闭）
+    clarification: dict  # 模型提出的澄清问题
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -123,6 +126,34 @@ def extract_thought(text: str) -> str:
     prose = _CODE_BLOCK.sub(" ", text or "")
     prose = re.sub(r"\s+", " ", prose).strip()
     return prose[:200]
+
+
+_CLARIFY_OPTION = re.compile(r"^\s*(?:[-*•]|\d+[.、)])\s*")
+
+
+def extract_clarification(text: str) -> dict | None:
+    """解析模型的 ```clarify 代码块：{question, term, options}；没有或无效时返回 None。"""
+    for lang, body in _CODE_BLOCK.findall(text or ""):
+        if lang.lower() != "clarify":
+            continue
+        question, term, options = "", "", []
+        for raw in body.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if _CLARIFY_OPTION.match(line):
+                opt = _CLARIFY_OPTION.sub("", line).strip()
+                if opt and len(options) < 4:
+                    options.append(opt[:60])
+            elif re.match(r"^问题\s*[:：]", line):
+                question = re.sub(r"^问题\s*[:：]\s*", "", line)
+            elif re.match(r"^口径词\s*[:：]", line):
+                term = re.sub(r"^口径词\s*[:：]\s*", "", line).strip("「」\"“”'")
+            elif not question:
+                question = line
+        if question:
+            return {"question": question[:120], "term": term[:30], "options": options}
+    return None
 
 
 def extract_code(text: str, langs: tuple[str, ...] = ("python", "py")) -> str:
@@ -295,12 +326,15 @@ class DeepQuery:
         generate_answer: bool = True,
         generate_chart: bool = False,
         user_id: str = "default",
+        allow_clarify: bool = False,
     ) -> RunOutcome:
         """回答一个自然语言问题。generate_answer=False 时跳过总结节点（评测省成本）；
-        generate_chart=True 时对成功结果生成图表（模型写代码 → 沙箱执行）。"""
+        generate_chart=True 时对成功结果生成图表（模型写代码 → 沙箱执行）；
+        allow_clarify=True 时问题有歧义或数据缺失会返回 needs_clarification（交互场景用，
+        评测保持关闭，提示词与历史评测一致）。"""
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id
+            question, generate_answer, generate_chart, user_id, allow_clarify
         )
         try:
             final: dict = self._graph.invoke(state, config=self._run_config())
@@ -317,6 +351,7 @@ class DeepQuery:
         generate_chart: bool = False,
         user_id: str = "default",
         on_answer_delta=None,
+        allow_clarify: bool = False,
     ):
         """逐节点流式执行（服务端 SSE 用）。
 
@@ -325,7 +360,7 @@ class DeepQuery:
         """
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id
+            question, generate_answer, generate_chart, user_id, allow_clarify
         )
         if on_answer_delta is not None:
             state["on_answer_delta"] = on_answer_delta
@@ -350,7 +385,12 @@ class DeepQuery:
         return {"recursion_limit": 2 * self.settings.agent_max_repair_rounds + 12}
 
     def _prepare_run(
-        self, question: str, generate_answer: bool, generate_chart: bool, user_id: str = "default"
+        self,
+        question: str,
+        generate_answer: bool,
+        generate_chart: bool,
+        user_id: str = "default",
+        allow_clarify: bool = False,
     ):
         self.maybe_refresh_schema()  # 建/改表后无需重启即生效（CLI/MCP/服务共用此入口）
         snap = self._snap  # 本次运行全程只用这一份快照
@@ -377,6 +417,7 @@ class DeepQuery:
             "meter": meter,
             "trace": trace,
             "allowed_tables": snap.allowed_tables,
+            "allow_clarify": allow_clarify,
         }
         return state, meter, trace, selected_tables, context_used
 
@@ -404,6 +445,7 @@ class DeepQuery:
             hallucination_blocked=final.get("hallucination_blocked", False),
             chart_path=final.get("chart_path"),
             chart_error=final.get("chart_error"),
+            clarification=final.get("clarification"),
             result=last_ok.result if last_ok else None,
             attempts=attempts,
             usage=meter.snapshot(),
@@ -437,12 +479,17 @@ class DeepQuery:
         g.add_node("chart", self._node_chart)
         g.add_node("summarize", self._node_answer)
         g.add_node("fallback", self._node_fallback)
+        g.add_node("clarify", self._node_clarify)
 
         g.set_entry_point("generate_sql")
         g.add_conditional_edges(
             "generate_sql",
-            lambda s: "fallback" if s.get("status") in ("budget_exceeded", "failed") else "execute",
-            {"execute": "execute", "fallback": "fallback"},
+            lambda s: (
+                "clarify"
+                if s.get("status") == "needs_clarification"
+                else "fallback" if s.get("status") in ("budget_exceeded", "failed") else "execute"
+            ),
+            {"execute": "execute", "fallback": "fallback", "clarify": "clarify"},
         )
         g.add_conditional_edges(
             "execute",
@@ -457,6 +504,7 @@ class DeepQuery:
         )
         g.add_edge("summarize", END)
         g.add_edge("fallback", END)
+        g.add_edge("clarify", END)
         return g.compile()
 
     # ---------- nodes ----------
@@ -475,8 +523,11 @@ class DeepQuery:
         )
 
     def _node_generate_sql(self, state: _State) -> _State:
+        system = prompts.sql_system(self.db.dialect)
+        if state.get("allow_clarify"):
+            system += prompts.CLARIFY_RULES
         messages = [
-            {"role": "system", "content": prompts.sql_system(self.db.dialect)},
+            {"role": "system", "content": system},
             {
                 "role": "user",
                 "content": prompts.SQL_USER_TEMPLATE.format(
@@ -491,7 +542,21 @@ class DeepQuery:
         except LLMError as e:
             return {"status": "failed", "give_up_reason": f"LLM 调用失败: {e}"}
         self._record_generation(state, "generate_sql", messages, reply)
+        if state.get("allow_clarify"):
+            clarification = extract_clarification(reply.text)
+            if clarification:
+                # 有歧义或数据缺失：不猜，把问题交还给用户
+                return {
+                    "status": "needs_clarification",
+                    "clarification": clarification,
+                    "answer": clarification["question"],
+                    "thought": extract_thought(reply.text),
+                }
         return {"candidate_sql": extract_sql(reply.text), "thought": extract_thought(reply.text)}
+
+    def _node_clarify(self, state: _State) -> _State:
+        self._trace(state).span("clarify", metadata=state.get("clarification") or {})
+        return {}
 
     def _node_execute(self, state: _State) -> _State:
         sql_raw = state.get("candidate_sql", "")

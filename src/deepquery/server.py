@@ -60,6 +60,7 @@ _NODE_LABELS = {
     "chart": "生成图表（沙箱）",
     "summarize": "归纳回答",
     "fallback": "降级收尾",
+    "clarify": "需要向你确认",
 }
 
 
@@ -91,7 +92,7 @@ def _notice_payload(message: str) -> dict:
         "status": "failed", "cached": False, "answer": message, "sql": None,
         "predicted_sql": None, "columns": [], "rows": [], "row_count": 0, "attempts": [],
         "selected_tables": None, "context_used": None, "hallucination_blocked": False,
-        "chart_url": None, "chart_error": None,
+        "chart_url": None, "chart_error": None, "clarification": None,
         "usage": {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}, "latency_ms": 0,
     }
 
@@ -121,6 +122,7 @@ def _outcome_payload(outcome: RunOutcome, cached: bool = False) -> dict:
         "hallucination_blocked": outcome.hallucination_blocked,
         "chart_url": f"/charts/{Path(outcome.chart_path).name}" if outcome.chart_path else None,
         "chart_error": outcome.chart_error,
+        "clarification": outcome.clarification,
         "usage": outcome.usage,
         "latency_ms": outcome.latency_ms,
     }
@@ -179,6 +181,14 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         require_code(code)
         return {"ok": True}
 
+    def dataset_note() -> str:
+        if settings.dataset_note:
+            return settings.dataset_note
+        from .demo_data import DEFAULT_PATH, DESCRIPTION
+
+        is_demo = "://" not in settings.db_path and Path(settings.db_path).name == DEFAULT_PATH.name
+        return DESCRIPTION if is_demo else ""
+
     @app.get("/healthz")
     def healthz():
         db_target = settings.db_path
@@ -194,6 +204,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             "db": db_target,
             "model": "mock" if settings.llm_mock else settings.llm_model,
             "protected": bool(settings.demo_access_code),
+            "dataset_note": dataset_note(),
         }
 
     @app.get("/metrics")
@@ -270,6 +281,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         chart: bool = Query(False),
         user: str = Query("default", max_length=64),
         fresh: bool = Query(False),  # true=跳过缓存读取强制重跑（结果仍会写入缓存）
+        clarify: bool = Query(True),  # 允许 Agent 先向用户确认；回答澄清后的追问传 0，避免反复追问
         code: str | None = Query(None, max_length=64),
     ):
         require_code(code)
@@ -317,6 +329,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                         generate_chart=chart,
                         user_id=user,
                         on_answer_delta=lambda text: q.put(("delta", {"text": text})),
+                        allow_clarify=clarify,
                     ):
                         if kind == "node":
                             q.put(("node", _node_event(item, extra or {})))

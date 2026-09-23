@@ -78,6 +78,29 @@ schema 装得下就完整交给模型，超过体积阈值才检索选表；业�
 
 </td>
 </tr>
+<tr>
+<td width="33%" valign="top">
+
+**🙋 拿不准先确认**
+
+"最好的客户"这类没有定义的说法，先给出几种口径让用户选，选择可以存为记忆；问到库里没有的数据，说明缺什么并给出能回答的相近问法
+
+</td>
+<td width="33%" valign="top">
+
+**🧠 跨会话记忆**
+
+用户确认过的口径和偏好会保存下来，之后的提问自动带上；公网部署时每个访客的记忆相互隔离
+
+</td>
+<td width="33%" valign="top">
+
+**🔌 多种接入**
+
+网页、命令行和 MCP server 共用同一套 Agent；SQLite / MySQL / PostgreSQL 只读接入，换库只改连接串
+
+</td>
+</tr>
 </table>
 
 <details>
@@ -113,6 +136,8 @@ schema 装得下就完整交给模型，超过体积阈值才检索选表；业�
 flowchart LR
     Q([提问]) --> CTX["上下文组装<br/>schema 直供或检索选表<br/>+ 业务口径 / 例句 / 记忆"]
     CTX --> GEN[生成 SQL]
+    GEN -- 口径不明或缺数据 --> ASK(["向用户确认<br/>给出可选口径"])
+    ASK -. 用户选择后重新提问 .-> Q
     GEN --> EXE["守卫校验<br/>只读执行"]
     EXE -- 成功 --> SUM["归纳回答<br/>数字溯源校验"]
     EXE -- 成功，需要图表 --> CH["生成图表<br/>沙箱执行"]
@@ -142,7 +167,7 @@ flowchart LR
 ```bash
 make install
 cp .env.example .env          # 填入 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
-make demo-db                  # 生成电商演示库（客户 / 商品 / 订单 / 支付，6 张表）
+make demo-db                  # 生成虚构电商演示库：240 位客户、36 个商品、1500 笔订单，6 张表
 make ask Q="下单次数最多的前5名客户是谁？"
 make serve                    # 网页 http://localhost:8000
 ```
@@ -181,7 +206,7 @@ deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # uv syn
 
 ## 更多
 
-- [docs/DEPLOY.md](docs/DEPLOY.md)：服务器部署、nginx 反代、访问口令
+- [docs/DEPLOY.md](docs/DEPLOY.md)：服务器部署、nginx 反代、访问口令、演示数据说明
 - [docs/benchmarks.md](docs/benchmarks.md)：BIRD / Spider 接入与统计口径
 - [docs/badcases.md](docs/badcases.md)：失败案例逐条复盘
 - [docs/frontend-spec.md](docs/frontend-spec.md)：SSE 事件与 API 约定

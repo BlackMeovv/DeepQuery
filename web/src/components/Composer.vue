@@ -6,7 +6,7 @@ const store = useAppStore();
 
 function send() {
   if (store.running) store.stop();
-  else store.ask(store.draft);
+  else store.submit(store.draft);
 }
 </script>
 

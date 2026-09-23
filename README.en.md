@@ -79,6 +79,29 @@ Steps and answers stream token by token; every answer expands to the SQL it ran,
 
 </td>
 </tr>
+<tr>
+<td width="33%" valign="top">
+
+**🙋 Asks before guessing**
+
+Undefined terms like "best customer" get a short list of interpretations to pick from, and the choice can be saved as memory; questions about data that doesn't exist get an explanation and answerable alternatives
+
+</td>
+<td width="33%" valign="top">
+
+**🧠 Cross-session memory**
+
+Confirmed definitions and preferences are saved and applied to later questions; on a public deployment each visitor's memory is isolated
+
+</td>
+<td width="33%" valign="top">
+
+**🔌 Many front doors**
+
+Web UI, CLI and an MCP server share one agent; SQLite / MySQL / PostgreSQL via read-only connections, switching databases is a connection string
+
+</td>
+</tr>
 </table>
 
 ## Results
@@ -110,7 +133,7 @@ Requires [uv](https://docs.astral.sh/uv/) and any OpenAI-compatible model API.
 ```bash
 make install
 cp .env.example .env          # set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
-make demo-db                  # deterministic e-commerce demo database
+make demo-db                  # fictional e-commerce data: 240 customers, 36 products, 1,500 orders
 make ask Q="Which 5 customers placed the most orders?"
 make serve                    # web UI at http://localhost:8000
 make test                     # 280+ offline tests, no API key needed

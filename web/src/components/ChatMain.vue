@@ -7,10 +7,12 @@ import Composer from "./Composer.vue";
 const store = useAppStore();
 const scroller = ref<HTMLElement | null>(null);
 
+// 后两条故意问得模糊 / 超出数据范围，用来体验 Agent 先向你确认
 const SAMPLES = [
-  "支付总金额最高的前3个城市是哪几个？",
-  "各品类的成交金额分别是多少？",
-  "下单次数最多的前5名客户是谁？",
+  { q: "各品类的成交金额分别是多少？" },
+  { q: "下单次数最多的前5名客户是谁？" },
+  { q: "哪个客户最好？", tag: "会先问你口径" },
+  { q: "各城市的退货率是多少？", tag: "库里没有退货数据" },
 ];
 
 const greetHead = computed(() => {
@@ -57,12 +59,14 @@ watch(
           <div class="gsub">
             已连接 <span class="mono">{{ store.env?.db || "…" }}</span> · 每个回答都可追溯到 SQL
           </div>
+          <div v-if="store.env?.dataset_note" class="dnote">{{ store.env.dataset_note }}</div>
           <Composer placeholder="问一个关于数据的问题…" :elevated="true" />
           <div class="samples">
             <div class="slabel">可以先试试</div>
-            <div v-for="(s, i) in SAMPLES" :key="s" class="sample" @click="store.ask(s)">
+            <div v-for="(s, i) in SAMPLES" :key="s.q" class="sample" @click="store.ask(s.q)">
               <span class="snum serif">{{ i + 1 }}</span>
-              <span class="stext">{{ s }}</span>
+              <span class="stext">{{ s.q }}</span>
+              <span v-if="s.tag" class="stag">{{ s.tag }}</span>
               <span class="sarrow">→</span>
             </div>
           </div>
@@ -82,7 +86,9 @@ watch(
         </div>
       </div>
       <div class="cbottom">
-        <div class="cwrap"><Composer placeholder="继续追问，或换一个问题…" /></div>
+        <div class="cwrap">
+          <Composer :placeholder="store.pendingClarify ? '选一个上面的选项，或直接输入你的意思…' : '继续追问，或换一个问题…'" />
+        </div>
       </div>
     </template>
   </div>
@@ -113,6 +119,10 @@ watch(
 .ewrap { width: 100%; max-width: 640px; margin: 0 auto; position: relative; }
 .greet { font-size: 44px; line-height: 1.18; margin-bottom: 12px; }
 .gsub { font-size: 13.5px; color: var(--ink3); margin-bottom: 32px; }
+.dnote {
+  font-size: 13px; line-height: 1.7; color: var(--ink2); margin: -18px 0 26px;
+  padding-left: 12px; border-left: 3px solid var(--acc2bg);
+}
 .gsub .mono { font-size: 12.5px; }
 .samples { display: flex; flex-direction: column; gap: 8px; margin-top: 34px; }
 .slabel { font-size: 11px; letter-spacing: 0.1em; color: var(--ink3); padding: 0 2px 2px; }
@@ -124,6 +134,7 @@ watch(
 .sample:hover { background: var(--accbg); }
 .snum { width: 30px; height: 30px; flex: none; border-radius: 50%; background: var(--acc2bg); color: var(--acc2deep); display: flex; align-items: center; justify-content: center; font-size: 13px; }
 .stext { font-size: 14.5px; color: var(--ink); }
+.stag { font-size: 11.5px; color: var(--accink); background: var(--accbg); border-radius: 999px; padding: 2px 10px; flex: none; }
 .sarrow { margin-left: auto; color: var(--acc); font-size: 15px; }
 
 .msgs { flex: 1; overflow-y: auto; padding: 28px 28px 8px; }

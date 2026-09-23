@@ -51,7 +51,9 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 
 ### 1. `GET /healthz`
 ```json
-{ "ok": true, "cache": "memory|redis", "mock": false, "db": "ecommerce.sqlite", "model": "deepseek-chat" }
+{ "ok": true, "cache": "memory|redis", "mock": false, "db": "ecommerce.sqlite", "model": "deepseek-chat",
+  "protected": false,                       // true=开启了访问口令
+  "dataset_note": "一家虚构电商……" }         // 空状态展示的数据说明，可能为空串
 ```
 
 ### 2. `GET /api/schema` — 库表结构（左栏树）
@@ -64,14 +66,17 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 - `POST /api/memory`，body `{ "note": "…", "user": "default" }` → `{ "id": 2 }`（note 1-500 字）
 - `DELETE /api/memory/{id}?user=default` → `{ "ok": true }`（404=不存在）
 
-### 4. `GET /api/ask?question=…&chart=0|1&user=default` — 核心接口，SSE 流
+### 4. `GET /api/ask?question=…&chart=0|1&user=default&clarify=1` — 核心接口，SSE 流
+
+`clarify`（默认 1）允许 Agent 在口径不明或缺数据时先反问；用户回答确认后的追问传 `clarify=0`，避免来回拉扯。
+`fresh=1` 跳过缓存强制重跑。
 
 `Content-Type: text/event-stream`。用 `EventSource` 监听两类事件：
 
 **`event: node`**（每完成一个节点推一条，驱动右栏运行过程）：
 ```json
 {
-  "node": "generate_sql | execute | repair | chart | summarize | fallback",
+  "node": "generate_sql | execute | repair | chart | summarize | fallback | clarify",
   "label": "生成 SQL",
   "thought": "模型的一句话思路（generate_sql/repair 才有，可无）",
   "ok": false,               // 仅 execute/chart 携带
@@ -83,7 +88,7 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 **`event: final`**（一次且仅一次，结束后关闭 EventSource）：
 ```json
 {
-  "status": "ok | ok_empty | failed | budget_exceeded",
+  "status": "ok | ok_empty | failed | budget_exceeded | needs_clarification",
   "cached": false,                  // true=缓存命中（此时没有 node 事件，直接 final）
   "answer": "自然语言回答",
   "sql": "实际执行的 SQL（含守卫注入的 LIMIT）",
@@ -98,6 +103,9 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
   "hallucination_blocked": false,   // true=回答被防幻觉拦截降级（UI 应给警示态）
   "chart_url": "/charts/chart-ab12….png",  // 或 null；chart_error 为失败原因
   "chart_error": null,
+  // status=needs_clarification 时：Agent 没有写 SQL，而是要向用户确认（其余时候为 null）
+  // term 为空表示"缺数据"类确认，options 是能回答的相近问法，可直接作为新问题提交
+  "clarification": { "question": "你说的最好的客户按什么来排？", "term": "最好的客户", "options": ["按累计消费金额", "按下单次数"] },
   "usage": { "llm_calls": 2, "total_tokens": 930, "cost": 0.000271, "prompt_tokens": 0, "completion_tokens": 0, "unmetered_calls": 0 },
   "latency_ms": 2310
 }
@@ -117,6 +125,9 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 3. 数字列判定：整列 `null | number` 即右对齐 + 等宽字体
 4. `hallucination_blocked: true` → 回答区用警示样式并说明"已降级为原始查询结果"
 5. 历史/主题存 localStorage；支持 `?q=…&chart=1` 打开即自动执行（录 demo 用）
+6. `needs_clarification`：把 question 和 options 渲染成可点选的卡片。口径类（有 term）把选择拼回原问题
+   `原问题（补充说明：「term」指选项）` 再以 `clarify=0` 提问，可选地 `POST /api/memory` 存为 `「term」指：选项`；
+   缺数据类（term 为空）直接以选项作为新问题提问。确认结果不进缓存
 
 ## 六、构建与部署
 
