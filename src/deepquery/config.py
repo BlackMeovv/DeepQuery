@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     # 全站每日模型花费上限（与 LLM_PRICE_* 同币种），超出后只返回已缓存的答案
     rate_limit_per_minute: int = 0
     daily_cost_limit: float = 0.0
+    # 全站同时运行的提问数上限，超出时提示稍后再试（小内存服务器上防止并发拖垮服务）
+    max_concurrent_runs: int = 4
     # 网页空状态展示的数据说明（告诉访客这份数据是什么）；为空时演示库自动使用内置说明
     dataset_note: str = ""
     # 部署在 nginx 等反向代理之后时开启：用 X-Real-IP 区分访客。

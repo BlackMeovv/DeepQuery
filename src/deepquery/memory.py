@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import time
 from pathlib import Path
@@ -28,8 +29,15 @@ class MemoryStore:
                 )"""
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+    @contextlib.contextmanager
+    def _connect(self):
+        """提交/回滚后关闭连接（sqlite3 自带的 with 只管事务、不关连接，长跑的服务会攒下句柄）。"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def remember(self, user_id: str, note: str) -> int:
         note = note.strip()
@@ -48,6 +56,11 @@ class MemoryStore:
                 "DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id)
             )
             return cursor.rowcount > 0
+
+    def total(self) -> int:
+        """全库记忆条数（所有用户）。"""
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
 
     def notes(self, user_id: str) -> list[tuple[int, str, str]]:
         with self._connect() as conn:

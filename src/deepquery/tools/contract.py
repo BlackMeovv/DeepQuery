@@ -4,7 +4,9 @@
 ③ 绝不拼接字符串执行。
 """
 
+import datetime
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 # 统一错误分类：自纠错节点按这里的取值决定重写策略
 ERROR_KINDS = (
@@ -45,3 +47,21 @@ class QueryResult:
         if self.truncated:
             lines.append("（结果已按行数上限截断）")
         return "\n".join(lines)
+
+
+def plain_value(value):
+    """把驱动返回的值统一成 JSON 能直接序列化、数字校验能识别的基本类型。
+
+    MySQL/PostgreSQL 的 SUM/NUMERIC 返回 Decimal、日期列返回 date/datetime：
+    不转换的话 SSE 序列化会报错（钱已经花了却拿不到结果），数字溯源校验也认不出
+    Decimal 里的数字，会把正确回答误判为幻觉。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() and abs(value) < 2**53 else float(value)
+    if isinstance(value, (datetime.date, datetime.time)):  # datetime 是 date 的子类
+        return value.isoformat(sep=" ") if isinstance(value, datetime.datetime) else value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    return str(value)  # timedelta、UUID 等

@@ -4,11 +4,21 @@
 而不是指望模型自己"省着用"。超限后 agent 走降级收尾，不再调用 LLM。
 """
 
+import threading
 from dataclasses import dataclass, field
+from typing import Any
 
 
 class BudgetExceeded(RuntimeError):
     """预算（token 或金额）超限。"""
+
+
+class RunCancelled(BaseException):
+    """调用方取消了本次运行（如浏览器断开 SSE）。
+
+    继承 BaseException（同 asyncio.CancelledError）：各节点只捕获 LLMError / BudgetExceeded
+    并走降级，取消信号必须穿透它们直接结束运行，而不是被当成一次普通失败继续往下跑。
+    """
 
 
 @dataclass
@@ -25,6 +35,10 @@ class UsageMeter:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     by_tag: dict[str, int] = field(default_factory=dict)
+    cancel_event: Any = field(default=None, repr=False, compare=False)  # threading.Event | None
+
+    def cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
     @property
     def total_tokens(self) -> int:
@@ -54,6 +68,8 @@ class UsageMeter:
         return False
 
     def check(self) -> None:
+        if self.cancelled():
+            raise RunCancelled("调用方已取消本次运行")
         if self.exceeded():
             raise BudgetExceeded(
                 f"预算超限: tokens={self.total_tokens}/{self.max_tokens or '∞'}, "
@@ -69,3 +85,20 @@ class UsageMeter:
             "total_tokens": self.total_tokens,
             "cost": round(self.cost, 6),
         }
+
+
+class RunHandle:
+    """调用方与一次运行之间的控制句柄：可随时取消，结束后可读到本次的用量。
+
+    服务端用它在客户端断开时停止运行，并且无论成功、失败还是取消都按实际用量记账。
+    """
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+        self.meter: UsageMeter | None = None
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def usage(self) -> dict:
+        return self.meter.snapshot() if self.meter else UsageMeter().snapshot()

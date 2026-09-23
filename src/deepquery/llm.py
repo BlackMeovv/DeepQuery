@@ -8,6 +8,7 @@ MockLLM 与真实客户端同接口，供离线测试与评测基建自检使用
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from openai import (
@@ -19,7 +20,7 @@ from openai import (
     RateLimitError,
 )
 
-from .budget import UsageMeter
+from .budget import RunCancelled, UsageMeter
 from .config import Settings
 
 
@@ -36,8 +37,15 @@ class LLMError(RuntimeError):
 
 
 def estimate_tokens(texts) -> int:
-    """无 usage 时的保守 token 估算（约 4 字符/token）。"""
-    return sum(len(t) for t in texts) // 4
+    """无 usage 时的保守 token 估算：中日韩字符约 1 字 1 token，其余约 4 字符 1 token。
+
+    只按 4 字符/token 估算会把中文低估 2–4 倍，预算熔断和每日花费上限就会跟着失准。
+    """
+    total = 0
+    for t in texts:
+        cjk = sum(1 for ch in t if "\u2e80" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff" or "\uff00" <= ch <= "\uffef")
+        total += cjk + (len(t) - cjk) // 4
+    return total
 
 
 class BaseLLM:
@@ -71,10 +79,12 @@ class LLMClient(BaseLLM):
         delay = 2.0
         last_error: Exception | None = None
         for attempt in range(settings.llm_max_retries + 1):
+            if attempt:
+                meter.check()  # 重试前再确认：调用方可能已断开，或预算已在别处用尽
             start = time.monotonic()
             try:
                 if on_delta is not None:
-                    text, usage = self._chat_streaming(messages, on_delta)
+                    text, usage = self._chat_streaming(messages, on_delta, meter, tag)
                 else:
                     resp = self._client.chat.completions.create(
                         model=settings.llm_model,
@@ -114,11 +124,12 @@ class LLMClient(BaseLLM):
                 delay *= 2
         raise LLMError(f"LLM 调用重试 {settings.llm_max_retries} 次后仍失败: {last_error}") from last_error
 
-    def _chat_streaming(self, messages: list[dict], on_delta):
+    def _chat_streaming(self, messages: list[dict], on_delta, meter: UsageMeter, tag: str = ""):
         """流式调用：逐块累积文本并回调。
 
         不传 stream_options（部分中转会 400）；多数 OpenAI 兼容端会在末块带 usage，
         没有就落到调用方的字符估算兜底——预算熔断不因流式而失效。
+        途中被取消时立即关闭连接（上游随之停止生成），并按已收到的内容估算记账后再抛出。
         """
         settings = self._settings
         stream = self._client.chat.completions.create(
@@ -129,18 +140,30 @@ class LLMClient(BaseLLM):
         )
         parts: list[str] = []
         usage = None
-        for chunk in stream:
-            u = getattr(chunk, "usage", None)
-            if u is not None:
-                usage = u
-            choices = getattr(chunk, "choices", None)
-            if not choices:
-                continue
-            delta = getattr(choices[0], "delta", None)
-            piece = getattr(delta, "content", None) if delta is not None else None
-            if piece:
-                parts.append(piece)
-                on_delta("".join(parts))
+        try:
+            for chunk in stream:
+                if meter.cancelled():
+                    raise RunCancelled("调用方已取消本次运行")
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    usage = u
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                piece = getattr(delta, "content", None) if delta is not None else None
+                if piece:
+                    parts.append(piece)
+                    on_delta("".join(parts))
+        except RunCancelled:
+            stream.close()
+            meter.unmetered_calls += 1
+            meter.add(
+                estimate_tokens(str(m.get("content", "")) for m in messages),
+                estimate_tokens(parts),
+                tag=tag,
+            )
+            raise
         if not parts and usage is None:
             raise LLMError(f"LLM 流式返回为空（model={settings.llm_model}）")
         return "".join(parts), usage
@@ -158,7 +181,8 @@ class MockLLM(BaseLLM):
         self._replies = list(replies)
         self._cycle = cycle
         self._i = 0
-        self.calls: list[list[dict]] = []
+        # 服务 mock 模式（cycle）会长期运行：只保留最近的调用，避免内存随请求数增长
+        self.calls: list[list[dict]] | deque = deque(maxlen=200) if cycle else []
 
     def chat(self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None) -> LLMReply:
         meter.check()
@@ -171,6 +195,8 @@ class MockLLM(BaseLLM):
         if on_delta is not None:  # 模拟流式：分片回调累积文本（演示 mock 模式也能看到流式）
             step = max(1, len(text) // 8)
             for end in range(step, len(text) + step, step):
+                if meter.cancelled():  # 与真实客户端一致：流式途中可被取消
+                    raise RunCancelled("调用方已取消本次运行")
                 time.sleep(0.004)
                 on_delta(text[:end])
         # 与真实客户端的无 usage 兜底同源，保证预算熔断在离线路径同样可测

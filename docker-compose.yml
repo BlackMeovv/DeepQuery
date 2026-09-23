@@ -6,6 +6,8 @@
 # 注意 Docker 发布的端口会绕过 ufw 等主机防火墙，绑定 0.0.0.0 就等于对全网开放。
 services:
   app:
+    # tini 作为 1 号进程：回收图表子进程留下的僵尸进程，并正确转发停止信号
+    init: true
     build:
       context: .
       args:

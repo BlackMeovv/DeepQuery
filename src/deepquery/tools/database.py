@@ -15,7 +15,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .contract import QueryResult
+from .contract import QueryResult, plain_value
 
 MAX_VALUE_BYTES = 1_000_000  # 单个值（字符串/BLOB）上限，远大于任何正常的分析结果
 
@@ -161,7 +161,7 @@ class ReadOnlyDatabase:
             return QueryResult(
                 ok=True,
                 columns=columns,
-                rows=[tuple(r) for r in rows],
+                rows=[tuple(plain_value(v) for v in r) for r in rows],
                 row_count=len(rows),
                 truncated=truncated,
                 latency_ms=latency_ms,

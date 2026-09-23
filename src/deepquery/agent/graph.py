@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
@@ -24,7 +25,7 @@ from typing import Any, TypedDict
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
-from ..budget import BudgetExceeded, UsageMeter
+from ..budget import BudgetExceeded, RunHandle, UsageMeter
 from ..config import Settings
 from ..datasets import knowledge_paths
 from ..guard import validate
@@ -173,7 +174,7 @@ def extract_code(text: str, langs: tuple[str, ...] = ("python", "py")) -> str:
 _CHART_CODE_DENY = re.compile(
     r"\b(subprocess|socket|urllib|requests|http\.client|ftplib|ctypes|importlib|"
     r"__import__|eval\s*\(|exec\s*\(|os\.(system|popen|exec\w*|spawn\w*|remove|unlink|rmdir|symlink|link)|"
-    r"(symlink_to|hardlink_to)\s*\()"
+    r"(symlink_to|hardlink_to)\s*\(|environ|fork\s*\(|multiprocessing|os\.kill|signal\.)|/proc/"
 )
 
 
@@ -221,6 +222,8 @@ class DeepQuery:
         self.db = db
         self.llm = llm
         self.tracer = tracer or NOOP_TRACER
+        self._refresh_lock = threading.Lock()
+        self._fp_checked_at = time.monotonic()
         self._snap: _SchemaSnapshot = self._load_schema()
         glossary_path, examples_path = knowledge_paths(settings)  # 内置数据集自带各自的口径
         self._glossary = load_glossary(glossary_path)
@@ -268,9 +271,17 @@ class DeepQuery:
         不支持指纹的引擎返回空串，保持「启动时加载一次」的旧行为。
         """
         fp = getattr(self.db, "schema_fingerprint", None)
-        current = fp() if callable(fp) else ""
-        if current != self._snap.fingerprint:
-            self._snap = self._load_schema()  # 单次引用赋值：读者要么见旧快照，要么见新快照
+        if not callable(fp):
+            return self._snap.fingerprint
+        # SQLite 查指纹是微秒级，每次都查；MySQL/PG 要扫 information_schema，按引擎给的间隔节流
+        ttl = getattr(self.db, "fingerprint_ttl", 0)
+        if ttl and time.monotonic() - self._fp_checked_at < ttl:
+            return self._snap.fingerprint
+        with self._refresh_lock:  # 表结构变化时，并发请求只重建一次
+            current = fp()
+            self._fp_checked_at = time.monotonic()
+            if current != self._snap.fingerprint:
+                self._snap = self._load_schema()  # 单次引用赋值：读者要么见旧快照，要么见新快照
         return self._snap.fingerprint
 
     def _build_schema_context(
@@ -354,16 +365,22 @@ class DeepQuery:
         user_id: str = "default",
         on_answer_delta=None,
         allow_clarify: bool = False,
+        handle: RunHandle | None = None,
     ):
         """逐节点流式执行（服务端 SSE 用）。
 
         依次 yield ("node", 节点名, 增量状态)，最后 yield ("final", RunOutcome, None)。
         on_answer_delta：回答文本的逐字增量回调（在 answer 节点的 LLM 调用中触发）。
+        handle：调用方的控制句柄。handle.cancel() 后，下一次 LLM 调用前（或流式输出途中）
+        抛出 RunCancelled 结束运行；handle.meter 始终指向本次的用量，供调用方记账。
         """
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
             question, generate_answer, generate_chart, user_id, allow_clarify
         )
+        if handle is not None:
+            meter.cancel_event = handle.cancelled
+            handle.meter = meter
         if on_answer_delta is not None:
             state["on_answer_delta"] = on_answer_delta
         final_state: dict = dict(state)

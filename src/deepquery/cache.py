@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import threading
 import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING
@@ -44,23 +45,27 @@ class MemoryCache(BaseCache):
         self.ttl = ttl_seconds
         self.max_entries = max_entries
         self._store: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+        # 服务的多个请求线程并发读写：过期删除与淘汰交错时会 KeyError，所以整体加锁
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> dict | None:
-        item = self._store.get(key)
-        if item is None:
-            return None
-        expires_at, value = item
-        if time.monotonic() > expires_at:
-            del self._store[key]
-            return None
-        self._store.move_to_end(key)
-        return value
+        with self._lock:
+            item = self._store.get(key)
+            if item is None:
+                return None
+            expires_at, value = item
+            if time.monotonic() > expires_at:
+                del self._store[key]
+                return None
+            self._store.move_to_end(key)
+            return value
 
     def set(self, key: str, value: dict) -> None:
-        self._store[key] = (time.monotonic() + self.ttl, value)
-        self._store.move_to_end(key)
-        while len(self._store) > self.max_entries:
-            self._store.popitem(last=False)
+        with self._lock:
+            self._store[key] = (time.monotonic() + self.ttl, value)
+            self._store.move_to_end(key)
+            while len(self._store) > self.max_entries:
+                self._store.popitem(last=False)
 
 
 class RedisCache(BaseCache):

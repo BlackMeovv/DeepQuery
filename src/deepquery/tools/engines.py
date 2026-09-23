@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
-from .contract import QueryResult
+from .contract import QueryResult, plain_value
 from .database import ReadOnlyDatabase
 
 _MYSQL_PREFIXES = ("mysql://", "mysql+pymysql://")
@@ -95,6 +95,9 @@ class _ServerDatabase:
             cursor.close()
         return conn
 
+    # 服务器引擎的指纹检查要扫 information_schema，最多每隔这么久查一次
+    fingerprint_ttl = 5.0
+
     def run_query(self, sql: str) -> QueryResult:
         start = time.monotonic()
         try:
@@ -126,7 +129,7 @@ class _ServerDatabase:
                 return QueryResult(
                     ok=True,
                     columns=columns,
-                    rows=[tuple(r) for r in rows],
+                    rows=[tuple(plain_value(v) for v in r) for r in rows],
                     row_count=len(rows),
                     truncated=truncated,
                     latency_ms=latency_ms,

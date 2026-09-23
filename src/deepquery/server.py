@@ -12,9 +12,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import hmac
 import json
-import queue
 import re
 import threading
 import time
@@ -27,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from . import datasets
 from .agent import DeepQuery, RunOutcome
+from .budget import RunCancelled, RunHandle
 from .cache import BaseCache, build_cache, cache_key
 from .config import Settings, get_settings
 from .ratelimit import DailyBudget, SlidingWindowLimiter
@@ -46,6 +48,15 @@ COST = Counter("deepquery_llm_cost_total", "累计 LLM 成本（按 .env 单价�
 
 _CHART_NAME = re.compile(r"^chart-[0-9a-f]{12}\.png$")
 MAX_NOTES_PER_USER = 50  # 单个访客的记忆条数上限，防止公网演示时记忆库被灌满
+MAX_NOTES_TOTAL = 20_000  # 全库上限：访客 ID 由客户端生成，只按访客限制挡不住换 ID 刷库
+
+
+def memory_scope(agent: DeepQuery, user: str) -> str:
+    """用户记忆内容的指纹：记忆会注入提示词、影响答案，所以结果缓存按它区分。"""
+    notes = sorted(note for _id, note, _ts in agent.memory.notes(user)) if agent.memory else []
+    if not notes:
+        return "-"
+    return hashlib.sha256("\n".join(notes).encode("utf-8")).hexdigest()[:16]
 
 
 class MemoryNote(BaseModel):
@@ -145,6 +156,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
     state = {"agent": agent}
     limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
     budget = DailyBudget(settings.daily_cost_limit)
+    run_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_runs))
 
     def client_key(request: Request) -> str:
         if settings.trust_proxy_headers:
@@ -157,11 +169,15 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                 return ip
         return request.client.host if request.client else "unknown"
 
+    agent_lock = threading.Lock()
+
     def get_agent() -> DeepQuery:
         if state["agent"] is None:  # 惰性构建：测试可注入，生产首个请求时组装
-            from . import build_agent
+            with agent_lock:  # 并发的首批请求只构建一次
+                if state["agent"] is None:
+                    from . import build_agent
 
-            state["agent"] = build_agent(settings)
+                    state["agent"] = build_agent(settings)
         return state["agent"]
 
     def require_code(code: str | None) -> None:
@@ -251,6 +267,8 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         memory = get_memory()
         if len(memory.notes(item.user)) >= MAX_NOTES_PER_USER:
             raise HTTPException(status_code=429, detail=f"记忆最多保存 {MAX_NOTES_PER_USER} 条，请先删除一些")
+        if memory.total() >= MAX_NOTES_TOTAL:
+            raise HTTPException(status_code=429, detail="记忆库已满，请联系站点管理员")
         return {"id": memory.remember(item.user, item.note)}
 
     @app.delete("/api/memory/{note_id}")
@@ -293,15 +311,17 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             notice = _sse("final", _notice_payload("请求太频繁了，请稍等一分钟再试。"))
             return StreamingResponse(iter([notice]), media_type="text/event-stream", headers=sse_headers)
         agent_ = get_agent()
+        # 缓存按"记忆内容"而不是访客 ID 区分：没有记忆（或记忆相同）的访客共享同一份答案，
+        # 示例问题只需付一次钱；有私有记忆的访客答案可能不同，自然落到各自的键上
         key = cache_key(
-            f"{user}|{question}",
+            f"{memory_scope(agent_, user)}|{question}",
             db_path=settings.db_path,
             model=agent_.llm.model_name,
             chart=chart,
             schema=agent_.maybe_refresh_schema(),
         )
 
-        def stream():
+        async def stream():
             start = time.monotonic()
             cached = None if fresh else cache.get(key)
             if cached is not None:
@@ -318,10 +338,22 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                 REQUESTS.labels(status="quota_exceeded").inc()
                 yield _sse("final", _notice_payload("今天的演示额度已经用完了，请明天再来。已问过的问题仍可直接查看。"))
                 return
-            # 节点事件与回答逐字增量都要实时推送，但增量产生在 ask_stream 内部的
-            # LLM 调用期间（此时生成器阻塞在 next() 上）——所以放到工作线程跑，
-            # 通过队列把 node/delta/final 依序送回 SSE 生成器
-            q: queue.Queue = queue.Queue()
+            # 全站同时运行的提问数有上限：小内存服务器上并发过多会拖垮所有人，也会瞬间放大花费
+            if not run_slots.acquire(blocking=False):
+                REQUESTS.labels(status="busy").inc()
+                yield _sse("final", _notice_payload("现在提问的人有点多，请过几秒再试。"))
+                return
+            # agent 是同步代码，放到工作线程跑；节点事件与回答增量经 asyncio 队列送回这里。
+            # 生成器本身是异步的，等待期间不占用服务器线程池
+            loop = asyncio.get_running_loop()
+            q: asyncio.Queue = asyncio.Queue()
+            handle = RunHandle()
+
+            def put(item) -> None:
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, item)
+                except RuntimeError:  # 事件循环已关闭（服务正在退出）
+                    pass
 
             def pump():
                 try:
@@ -329,36 +361,45 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                         question,
                         generate_chart=chart,
                         user_id=user,
-                        on_answer_delta=lambda text: q.put(("delta", {"text": text})),
+                        on_answer_delta=lambda text: put(("delta", {"text": text})),
                         allow_clarify=clarify,
+                        handle=handle,
                     ):
-                        if kind == "node":
-                            q.put(("node", _node_event(item, extra or {})))
-                        else:
-                            q.put(("outcome", item))
-                except BaseException as e:  # noqa: BLE001 —— 原样转交给请求线程抛出
-                    q.put(("error", e))
-                q.put(("end", None))
+                        put(("node", _node_event(item, extra or {})) if kind == "node" else ("outcome", item))
+                except RunCancelled:
+                    REQUESTS.labels(status="cancelled").inc()
+                except BaseException as e:  # noqa: BLE001 —— 原样转交给请求协程抛出
+                    put(("error", e))
+                finally:
+                    # 成功、失败、中途取消都按实际用量记账：每日花费上限不能被"开了就关"绕过
+                    usage = handle.usage()
+                    TOKENS.inc(usage["total_tokens"])
+                    COST.inc(usage["cost"])
+                    budget.add(usage["cost"])
+                    run_slots.release()
+                    put(("end", None))
 
             threading.Thread(target=pump, daemon=True).start()
             outcome: RunOutcome | None = None
-            while True:
-                kind, item = q.get()
-                if kind == "end":
-                    break
-                if kind == "error":
-                    raise item
-                if kind == "outcome":
-                    outcome = item
-                    continue
-                yield _sse(kind, item)
+            try:
+                while True:
+                    kind, item = await q.get()
+                    if kind == "end":
+                        break
+                    if kind == "error":
+                        raise item
+                    if kind == "outcome":
+                        outcome = item
+                        continue
+                    yield _sse(kind, item)
+            finally:
+                # 浏览器断开（点了停止或关掉页面）时协程在 await 处被取消，走到这里：
+                # 通知工作线程停下，不再继续调用模型
+                handle.cancel()
             assert outcome is not None
             payload = _outcome_payload(outcome)
             REQUESTS.labels(status=outcome.status).inc()
             LATENCY.observe(time.monotonic() - start)
-            TOKENS.inc(outcome.usage.get("total_tokens", 0))
-            COST.inc(outcome.usage.get("cost", 0.0))
-            budget.add(outcome.usage.get("cost", 0.0))
             if outcome.hallucination_blocked:
                 HALLUCINATION_BLOCKED.inc()
             if outcome.succeeded:

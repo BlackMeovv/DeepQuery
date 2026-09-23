@@ -4,9 +4,11 @@
 - DockerSandbox（生产首选）：--network none 断网 + 内存/CPU 限额 + 只读挂载工作目录，
   镜像见 docker/chart-sandbox/Dockerfile；
 - SubprocessSandbox（开发兜底 / 容器内运行时）：独立子进程 + resource 限额
-  （地址空间/CPU 时间/文件大小）+ 隔离模式 python -I + 清空代理环境变量。
-  注意它不隔离网络与文件系统，安全性弱于 Docker——仅用于本机开发或
-  自身已跑在容器里的场景（compose 里 app 容器整体就是隔离边界）。
+  （地址空间/CPU 时间/文件大小）+ 隔离模式 python -I + 只保留必要的环境变量。
+  服务以 root 运行时（容器内），每次执行换成一个独立的无权限 uid：
+  读不到 root 进程的 /proc/*/environ（里面有 LLM_API_KEY），读不到 0700 的数据目录，
+  进程数有上限（挡 fork 炸弹），结束后按 uid 清掉它留下的所有进程。
+  它仍不隔离网络，安全性弱于 Docker——适合自身已跑在容器里的场景。
 
 代码契约（写进提示词）：工作目录有 data.json（{"columns": [...], "rows": [...]})，
 代码读取它并把图保存为 chart.png；只允许用 matplotlib/标准库。
@@ -14,13 +16,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +39,39 @@ if TYPE_CHECKING:
 # 完整 8 字节 PNG 签名；产物上限 10MB（正常图表几十到几百 KB）
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _MAX_CHART_BYTES = 10 * 1024 * 1024
+_KEEP_CHARTS = 500  # 输出目录只保留最近的图表，防止磁盘被慢慢写满
+
+# 以 root 运行时，每次执行分配一个独立 uid（不需要在 /etc/passwd 里存在）：
+# 并发的多次执行互不可见，结束后可以按 uid 精确清理
+_SANDBOX_UID_BASE = 61000
+_SANDBOX_UID_SPAN = 1000
+_uid_counter = itertools.count()
+_uid_lock = threading.Lock()
+
+
+def _next_sandbox_uid() -> int:
+    with _uid_lock:
+        return _SANDBOX_UID_BASE + next(_uid_counter) % _SANDBOX_UID_SPAN
+
+
+def _drop_to(uid: int) -> None:
+    os.setgroups([])
+    os.setgid(uid)
+    os.setuid(uid)
+
+
+def _kill_uid(uid: int) -> None:
+    """杀掉该 uid 的全部进程（含脱离进程组的孙进程）：以该 uid 身份执行 kill -9 -1。"""
+    try:
+        subprocess.run(["sh", "-c", "kill -9 -1"], preexec_fn=lambda: _drop_to(uid), timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _prune(out_dir: Path, keep: int = _KEEP_CHARTS) -> None:
+    charts = sorted(out_dir.glob("chart-*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in charts[keep:]:
+        old.unlink(missing_ok=True)
 
 
 @dataclass
@@ -90,6 +129,7 @@ class BaseSandbox:
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / f"chart-{uuid.uuid4().hex[:12]}.png"
         target.write_bytes(payload)
+        _prune(out_dir)
         return SandboxResult(ok=True, chart_path=str(target), logs=logs)
 
 
@@ -102,50 +142,77 @@ class SubprocessSandbox(BaseSandbox):
 
     def run(self, code: str, data: dict, out_dir: str | Path) -> SandboxResult:
         workdir = self._prepare(code, data)
+        # 只有 root 才能切换身份；本机开发（非 root）时退化为同用户子进程
+        uid = _next_sandbox_uid() if os.name == "posix" and os.geteuid() == 0 else None
+        proc: subprocess.Popen | None = None
         try:
             env = {
                 "PATH": os.environ.get("PATH", ""),
                 "MPLBACKEND": "Agg",  # 无显示环境
                 "HOME": workdir,
+                "OMP_NUM_THREADS": "1",  # 数值库别按 CPU 数开线程（线程也计入进程数上限）
+                "OPENBLAS_NUM_THREADS": "1",
             }
+            if uid is not None:
+                os.chown(workdir, uid, uid)  # 子进程要在工作目录里写 chart.png
 
             def limits():  # 子进程资源限额（POSIX，逐项 best-effort）
                 import resource
 
                 mem = self.memory_mb * 1024 * 1024
                 cpu = max(1, int(self.timeout_seconds))
-                for res, lim in (
+                caps = [
                     (resource.RLIMIT_AS, (mem, mem)),
                     (resource.RLIMIT_CPU, (cpu, cpu)),
                     (resource.RLIMIT_FSIZE, (20 * 1024 * 1024, 20 * 1024 * 1024)),
-                ):
+                ]
+                if uid is not None:
+                    # 进程数上限按 uid 计：只有换成独立 uid 后才能设，否则会连带限制服务自身
+                    caps.append((resource.RLIMIT_NPROC, (32, 32)))
+                for res, lim in caps:
                     try:
                         resource.setrlimit(res, lim)
                     except (ValueError, OSError):
                         # macOS 等平台不支持部分限额（如 RLIMIT_AS 会 EINVAL）。
                         # 跳过该项：墙钟 timeout 仍是硬保证，生产隔离靠 Docker。
                         pass
+                if uid is not None:
+                    _drop_to(uid)
 
-            proc = subprocess.run(
-                [sys.executable, "-I", "chart.py"],
-                cwd=workdir,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                preexec_fn=limits if os.name == "posix" else None,
-            )
-            logs = (proc.stdout + "\n" + proc.stderr).strip()
-            if proc.returncode in (-9, -24):  # SIGKILL/SIGXCPU：CPU 限额先于墙钟超时触发
+            # 输出写到主进程持有的临时文件而不是管道：代码 fork 出的后台子进程会继承管道，
+            # 用管道就得等它们全部退出才能读完，一个留后台的进程就能让每次执行都拖到超时
+            with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as out:
+                proc = subprocess.Popen(
+                    [sys.executable, "-I", "chart.py"],
+                    cwd=workdir,
+                    env=env,
+                    stdout=out,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,  # 独立进程组：超时时连同它的子进程一起杀掉
+                    preexec_fn=limits if os.name == "posix" else None,
+                )
+                try:
+                    returncode = proc.wait(timeout=self.timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    return SandboxResult(ok=False, error=f"执行超时（>{self.timeout_seconds}s）")
+                out.seek(0)
+                logs = out.read(200_000).strip()
+            if returncode in (-9, -24):  # SIGKILL/SIGXCPU：CPU 限额先于墙钟超时触发
                 return SandboxResult(
                     ok=False, error=f"执行超时（CPU 限额 {int(self.timeout_seconds)}s）", logs=logs[-2000:]
                 )
-            if proc.returncode != 0:
-                return SandboxResult(ok=False, error=f"退出码 {proc.returncode}", logs=logs[-2000:])
+            if returncode != 0:
+                return SandboxResult(ok=False, error=f"退出码 {returncode}", logs=logs[-2000:])
             return self._collect(workdir, out_dir, logs[-2000:])
-        except subprocess.TimeoutExpired:
-            return SandboxResult(ok=False, error=f"执行超时（>{self.timeout_seconds}s）")
         finally:
+            if uid is not None:
+                _kill_uid(uid)  # 清掉脱离进程组、还在后台的孙进程
+            elif proc is not None and os.name == "posix":
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
             shutil.rmtree(workdir, ignore_errors=True)
 
 
