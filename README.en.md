@@ -84,14 +84,14 @@ Steps and answers stream token by token; every answer expands to the SQL it ran,
 
 **🙋 Asks before guessing**
 
-Undefined terms like "best customer" get a short list of interpretations to pick from, and the choice can be saved as memory; questions about data that doesn't exist get an explanation and answerable alternatives
+Undefined terms like "best customer" get a short list of interpretations to pick from instead of a guess; questions about data that doesn't exist get an explanation and answerable alternatives
 
 </td>
 <td width="33%" valign="top">
 
 **🧠 Cross-session memory**
 
-Confirmed definitions and preferences are saved and applied to later questions; on a public deployment each visitor's memory is isolated
+Saved definitions and preferences are applied to every later question, so a defined term is never asked about again; on a public deployment each visitor's memory is isolated
 
 </td>
 <td width="33%" valign="top">

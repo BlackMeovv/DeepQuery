@@ -290,16 +290,15 @@ export const useAppStore = defineStore("app", {
 
     /**
      * 回答 Agent 的确认。口径类（有口径词）：把回答作为补充说明拼回原问题再问一次，
-     * 可选地存为记忆，以后同样的说法不再反问；数据缺失类：选项本身就是可回答的新问法，直接问。
+     * 数据缺失类：选项本身就是可回答的新问法，直接问。
      * 追问一律关闭反问，避免来回拉扯。
      */
-    async answerClarification(msgId: string, choice: string, remember = false) {
+    answerClarification(msgId: string, choice: string) {
       const text = choice.trim();
       const m = this.msgs.find((x) => x.id === msgId) as AiMsg | undefined;
       if (!text || !m?.clarification || m.clarifyAnswered || m.clarifySkipped || this.running) return;
       m.clarifyAnswered = text;
       const term = m.clarification.term;
-      if (remember && term) await this.addMem(`「${term}」指：${text}`);
       const question = term ? `${m.q}（补充说明：「${term}」指${text}）` : text;
       this.ask(question, { display: text, clarify: false });
     },
