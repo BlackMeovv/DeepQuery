@@ -43,7 +43,8 @@ class TestMetaCue:
 
     def test_meta_questions(self):
         for q in ("各指标使用了哪些表和字段？", "平均送达天数是怎么算的？", "GMV 和销售额有什么区别？",
-                  "这个数是从哪来的？", "延迟送达的口径是什么？", "上一轮的 SQL 是什么意思？"):
+                  "这个数是从哪来的？", "延迟送达的口径是什么？", "上一轮的 SQL 是什么意思？",
+                  "reviews 表和 orders 表是怎么关联的？"):
             assert _META_CUE.search(q), q
 
     def test_data_questions(self):

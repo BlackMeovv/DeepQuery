@@ -95,3 +95,37 @@ make olist-eval LABEL=baseline
 
 依次是：下载导入数据、离线自检（gold 回放必须 100%，不需要 API Key）、用真实模型跑 3 次。
 评测时通过 `--db data/olist/olist.sqlite` 指定库，业务口径会自动换成 Olist 的那一份。
+
+# 行为评测与分析评测
+
+执行准确率只回答"SQL 写得对不对"。在线问答里同样重要的是"该不该写 SQL"：
+有歧义时先问、数据里没有时说明缺什么、问口径时直接回答、寒暄时直接回应、追问时接上上一轮。
+这些行为靠提示词和编排层的规则实现，也需要单独测。
+
+**行为评测**（`eval/cases/olist-behavior.jsonl`，53 题，生成器 `src/deepquery/evalkit/behavior_set.py`）：
+
+| 类别 | 题数 | 期望 | 例子 |
+|---|---|---|---|
+| data | 8 | 直接查（其中 6 题有标准 SQL） | 2018 年 1 月有多少笔订单？ |
+| clarify | 8 | 先问口径 | 哪个卖家最好？ |
+| missing | 8 | 说明缺什么数据 | 各品类的退货率是多少？ |
+| meta | 9 | 不查数据直接回答 | 销售额是怎么算的？ |
+| chat | 6 | 直接回应 | 你是谁？ |
+| followup | 14 | 带着上一轮追问（12 题有标准 SQL，2 题追问口径） | 那只看东南部的呢？ |
+
+报告的指标：路径准确率；反问的精确率（问了的里面该问的）、召回率（该问的里面问了的）、
+"不该问却问了"的比例；有标准 SQL 的题的执行准确率。所有比例都带 95% Wilson 区间——53 题的样本不大，区间会比较宽，
+比较两个版本时看区间是否明显分开，不要只看点估计。
+
+**分析评测**（`eval/cases/olist-analysis.jsonl`，6 题）：分析题没有唯一的标准答案，只统计能自动判定的部分——
+给出结论的比例、结论通过逐句溯源（没有被拦下改为列结果）的比例、各步查询成功率、平均步数、
+平均核对数字个数、模型调用次数、耗时和花费。结论写得好不好，需要人读报告文件里的 answer 判断。
+
+```bash
+make behavior-gold
+make behavior-eval LABEL=baseline
+make analysis-eval LABEL=baseline
+```
+
+依次是：离线检查标准 SQL（不需要 API Key）、跑行为评测、跑分析评测。报告写入 `eval/results/behavior-*.json`
+和 `eval/results/analysis-*.json`。

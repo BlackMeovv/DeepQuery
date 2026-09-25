@@ -1,4 +1,4 @@
-.PHONY: install demo-db olist-db olist-set olist-gold olist-eval test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
+.PHONY: install demo-db olist-db olist-set olist-gold olist-eval behavior-gold behavior-eval analysis-eval test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
 
 install:            ## 安装依赖（含 dev）
 	uv sync --extra dev
@@ -53,6 +53,15 @@ olist-gold:         ## Olist 评测集自检：gold 回放必须 100%（不需�
 
 olist-eval:         ## Olist 真实数据跑分：make olist-eval LABEL=baseline（需要 .env 里的模型 API）
 	uv run python -m deepquery.evalkit.runner --cases eval/cases/olist-dev.jsonl --db data/olist/olist.sqlite --repeats 3 --label $(or $(LABEL),olist-baseline)
+
+behavior-gold:      ## 行为评测集自检：标准 SQL 与追问的上一轮 SQL 都能跑通（不需要 API Key）
+	uv run python -m deepquery.evalkit.behavior --db data/olist/olist.sqlite --gold-check
+
+behavior-eval:      ## 行为评测：该问的问、该直接回答的回答、该查的查，追问的准确率：make behavior-eval LABEL=baseline
+	uv run python -m deepquery.evalkit.behavior --db data/olist/olist.sqlite --label $(or $(LABEL),baseline)
+
+analysis-eval:      ## 分析模式评测：结论能否逐句核对出处、各步成功率、耗时花费：make analysis-eval LABEL=baseline
+	uv run python -m deepquery.evalkit.behavior --db data/olist/olist.sqlite --analysis --label $(or $(LABEL),baseline)
 
 serve:              ## 启动服务（网页 http://localhost:8000）
 	uv run deepquery serve
