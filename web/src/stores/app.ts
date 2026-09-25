@@ -54,6 +54,7 @@ export interface AiMsg {
   chart?: boolean; // 本次提问是否请求了图表
   sourceTables?: string[];
   numbersVerified?: number;
+  sqlSummary?: string[]; // 口径说明：筛选了什么、怎么分组排序、取多少条
   clarification?: Clarification | null; // Agent 拿不准时向用户提的确认
   clarifyAnswered?: string; // 用户对这次确认给出的回答
   noClarify?: boolean; // 这是回答确认后的追问：不再允许反问（重跑时沿用）
@@ -315,6 +316,7 @@ export const useAppStore = defineStore("app", {
             contextUsed: p.context_used,
             sourceTables: p.source_tables ?? [],
             numbersVerified: p.numbers_verified ?? 0,
+            sqlSummary: p.sql_summary ?? [],
             usage: { calls: p.usage.llm_calls, tokens: p.usage.total_tokens, cost: p.usage.cost },
             latencyMs: p.latency_ms,
           });

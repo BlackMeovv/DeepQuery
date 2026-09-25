@@ -112,6 +112,7 @@ export interface FinalPayload {
   hallucination_blocked: boolean;
   source_tables?: string[]; // 回答依据的数据来自哪几张表
   numbers_verified?: number; // 回答中核对过出处的数字个数
+  sql_summary?: string[]; // 口径说明（从 SQL 语法树生成）：筛选 / 分组 / 排序 / 条数
   chart_url: string | null;
   chart_error: string | null;
   clarification?: Clarification | null;

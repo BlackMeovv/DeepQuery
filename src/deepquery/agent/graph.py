@@ -32,7 +32,7 @@ from typing import Any, TypedDict
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 
-from .. import disclosure, smalltalk
+from .. import disclosure, scope, smalltalk
 from ..budget import BudgetExceeded, RunHandle, UsageMeter
 from ..config import Settings
 from ..datasets import for_db, knowledge_paths
@@ -76,6 +76,7 @@ class RunOutcome:
     chart_path: str | None = None  # 沙箱生成的图表文件（未请求/失败时为 None）
     chart_error: str | None = None
     clarification: dict | None = None  # 需要向用户确认时：{question, term, options}
+    sql_summary: list[str] = field(default_factory=list)  # 口径说明：筛选 / 分组 / 排序 / 条数
     result: QueryResult | None = None
     attempts: list[Attempt] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
@@ -278,6 +279,7 @@ class _SchemaSnapshot:
     retriever: Any
     columns: dict  # 表 → 列名清单（渐进式披露的目录、查列取值时核对列名）
     catalog: dict  # 表 → 一行目录（表名 + 说明 + 列名）
+    labels: dict  # (表, 列) → 建表注释里的中文名与枚举值中文（口径说明用）
 
 
 def resolve_allowed_tables(settings: Settings, db) -> set[str]:
@@ -353,6 +355,7 @@ class DeepQuery:
             retriever=SchemaRetriever(docs, embedder=build_embedder(self.settings)),
             columns=columns,
             catalog=disclosure.build_catalog(docs, columns),
+            labels=scope.column_labels(docs),
         )
 
     def maybe_refresh_schema(self) -> str:
@@ -579,6 +582,9 @@ class DeepQuery:
         executed_sql, raw_sql = self._pick_final(final, attempts, last_ok)
         if final.get("schema_mode") == "disclose":
             selected_tables = list(final.get("expanded_tables") or [])  # 渐进式披露：实际展开的表
+        snap = final.get("schema_snap") or self._snap
+        # 口径说明用模型原始 SQL：守卫注入的 LIMIT 200 不是用户要的"取前 200 条"
+        summary = scope.describe(raw_sql, self.db.dialect, snap.labels) if raw_sql else []
         outcome = RunOutcome(
             question=question,
             status=final.get("status", "failed"),
@@ -592,6 +598,7 @@ class DeepQuery:
             chart_path=final.get("chart_path"),
             chart_error=final.get("chart_error"),
             clarification=final.get("clarification"),
+            sql_summary=summary,
             result=last_ok.result if last_ok else None,
             attempts=attempts,
             usage=meter.snapshot(),

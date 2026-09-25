@@ -148,7 +148,7 @@ def _notice_payload(message: str) -> dict:
         "predicted_sql": None, "columns": [], "rows": [], "row_count": 0, "attempts": [],
         "selected_tables": None, "context_used": None, "hallucination_blocked": False,
         "chart_url": None, "chart_error": None, "clarification": None,
-        "source_tables": [], "numbers_verified": 0,
+        "source_tables": [], "numbers_verified": 0, "sql_summary": [],
         "usage": {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}, "latency_ms": 0,
     }
 
@@ -179,6 +179,7 @@ def _outcome_payload(outcome: RunOutcome, cached: bool = False) -> dict:
         # 回答下方的"出处"：数据来自哪几张表、回答里有几个数字核对过出处
         "source_tables": sorted(tables_in_sql(outcome.final_sql)) if outcome.final_sql else [],
         "numbers_verified": outcome.numbers_verified,
+        "sql_summary": outcome.sql_summary,  # 口径说明：从 SQL 语法树生成，不经过模型
         "chart_url": f"/charts/{Path(outcome.chart_path).name}" if outcome.chart_path else None,
         "chart_error": outcome.chart_error,
         "clarification": outcome.clarification,

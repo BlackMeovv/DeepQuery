@@ -152,6 +152,13 @@ function copyAnswer() {
       <span class="dotsep">·</span>
       <span>未查询数据</span>
     </div>
+    <div v-if="showSource && msg.sqlSummary?.length" class="source scope" title="从 SQL 自动生成，不经过模型">
+      <span class="srctag scopetag">口径</span>
+      <template v-for="(part, i) in msg.sqlSummary" :key="i">
+        <span v-if="i" class="dotsep">·</span>
+        <span>{{ part }}</span>
+      </template>
+    </div>
 
     <ResultTable v-if="msg.columns && msg.columns.length" :msg="msg" />
 
@@ -222,6 +229,8 @@ function copyAnswer() {
   border-radius: 999px; padding: 1px 9px; margin-right: 2px;
 }
 .dotsep { opacity: 0.6; }
+.scope { margin-top: -8px; color: var(--ink2); }
+.scopetag { color: var(--accink); background: var(--accbg); }
 .verified { color: var(--acc2ink); }
 .srclink { margin-left: auto; cursor: pointer; color: var(--accink); }
 .srclink:hover { text-decoration: underline; }
