@@ -30,8 +30,9 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Str
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 
-from . import datasets
+from . import datasets, smalltalk
 from .agent import DeepQuery, RunOutcome
+from .agent.analyst import AnalysisOutcome, source_tables as analysis_tables
 from .budget import RunCancelled, RunHandle
 from .cache import BaseCache, build_cache, cache_key
 from .config import Settings, get_settings
@@ -89,6 +90,7 @@ class AskBody(BaseModel):
     clarify: bool = True  # 允许 Agent 先向用户确认；回答澄清后的追问传 false，避免反复追问
     code: str | None = Field(default=None, max_length=64)
     history: list[HistoryTurn] = Field(default_factory=list, max_length=3)
+    mode: Literal["ask", "analyze"] = "ask"  # analyze = 分析模式：拆成几步查询，再写带出处的结论
 
 
 def history_scope(history: list[dict]) -> str:
@@ -165,6 +167,48 @@ def _notice_payload(message: str) -> dict:
     }
 
 
+def _step_payload(r: dict, max_rows: int = 20) -> dict:
+    """分析模式的一步（不含 QueryResult 对象本身，可直接 JSON 序列化、写缓存）。"""
+    res = r.get("result")
+    return {
+        "no": r.get("no"), "question": r.get("question"), "purpose": r.get("purpose", ""),
+        "status": r.get("status", "pending"), "ok": bool(r.get("ok")),
+        "sql": r.get("sql"), "predicted_sql": r.get("predicted_sql"), "summary": r.get("summary") or [],
+        "columns": res.columns if res else [], "rows": [list(row) for row in res.rows[:max_rows]] if res else [],
+        "row_count": res.row_count if res else 0, "error": r.get("error"),
+    }
+
+
+def _analysis_event(node: str, delta: dict) -> dict:
+    if node == "plan":
+        steps = [{k: s[k] for k in ("no", "question", "purpose")} for s in delta.get("steps") or []]
+        return {"node": "plan", "label": "制定分析计划", "thought": delta.get("plan_thought", ""), "steps": steps}
+    if node == "run_step":
+        r = (delta.get("results") or [{}])[0]
+        return {"node": "run_step", "label": f"第 {r.get('no')} 步", "step": _step_payload(r)}
+    if node == "review":
+        added = [{k: s[k] for k in ("no", "question", "purpose")} for s in delta.get("pending") or []]
+        return {"node": "review", "label": "检查是否需要下钻", "thought": delta.get("review_note", ""), "added": added}
+    return {"node": node, "label": {"report": "写结论"}.get(node, node)}
+
+
+def _analysis_payload(outcome: AnalysisOutcome) -> dict:
+    payload = _notice_payload(outcome.answer)
+    payload.update({
+        "status": outcome.status,
+        "mode": "analyze",
+        "steps": [_step_payload(s) for s in outcome.steps],
+        "plan_thought": outcome.plan_thought,
+        "review_note": outcome.review_note,
+        "source_tables": analysis_tables(outcome.steps),
+        "numbers_verified": outcome.numbers_verified,
+        "hallucination_blocked": outcome.hallucination_blocked,
+        "usage": outcome.usage,
+        "latency_ms": outcome.latency_ms,
+    })
+    return payload
+
+
 def _outcome_payload(outcome: RunOutcome, cached: bool = False) -> dict:
     result = outcome.result
     return {
@@ -231,13 +275,21 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                     runlog_holder["log"] = RunLog(settings.run_log_path, settings.run_log_keep)
         return runlog_holder["log"]
 
-    def record_run(user: str, question: str, payload: dict, history: list[dict], model: str) -> None:
+    def record_run(user: str, question: str, payload: dict, history: list[dict], model: str, mode: str = "ask") -> None:
         """记一次运行，把 run_id 放进结果里（前端反馈时带回）。记录失败不影响回答。"""
         log = run_log()
         if log is None:
             return
+        detail = None
+        if mode == "analyze":  # 分析模式没有单条 SQL：把各步的问题和 SQL 记进 detail
+            detail = {"steps": [
+                {k: s.get(k) for k in ("no", "question", "status", "predicted_sql", "row_count")}
+                for s in payload.get("steps") or []
+            ]}
         try:
-            payload["run_id"] = log.record(user=user, question=question, payload=payload, history=history, model=model)
+            payload["run_id"] = log.record(
+                user=user, question=question, payload=payload, history=history, model=model, mode=mode, detail=detail
+            )
         except Exception:  # noqa: BLE001
             logger.warning("运行记录写入失败", exc_info=True)
 
@@ -381,7 +433,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         require_code(body.code)
         return ask_response(
             request, body.question, body.chart, body.user, body.fresh, body.clarify,
-            [t.model_dump() for t in body.history],
+            [t.model_dump() for t in body.history], body.mode,
         )
 
     @app.post("/api/feedback")
@@ -418,6 +470,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         fresh: bool,
         clarify: bool,
         history: list[dict],
+        mode: str = "ask",
     ) -> StreamingResponse:
         sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         if not limiter.hit(client_key(request)):
@@ -426,12 +479,16 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             notice = _sse("final", _notice_payload("请求太频繁了，请稍等一分钟再试。"))
             return StreamingResponse(iter([notice]), media_type="text/event-stream", headers=sse_headers)
         agent_ = get_agent()
+        if mode == "analyze" and smalltalk.kind(question):
+            mode = "ask"  # 打开分析模式时说"你好"，照常直接回复
         # 缓存按"记忆内容"而不是访客 ID 区分：没有记忆（或记忆相同）的访客共享同一份答案，
         # 示例问题只需付一次钱；有私有记忆的访客答案可能不同，自然落到各自的键上
         # 有对话上下文时再加一段它的指纹（没有时保持原来的键，已有缓存继续有效）
         scope = memory_scope(agent_, user)
         if history:
             scope += f"|h:{history_scope(history)}"
+        if mode == "analyze":
+            scope += "|analyze"
         key = cache_key(
             f"{scope}|{question}",
             db_path=settings.db_path,
@@ -451,7 +508,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                 # 如实报告本次请求的消耗：命中缓存 = 零模型调用、零成本
                 cached_payload["usage"] = {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}
                 cached_payload["latency_ms"] = int((time.monotonic() - start) * 1000)
-                record_run(user, question, cached_payload, history, agent_.llm.model_name)
+                record_run(user, question, cached_payload, history, agent_.llm.model_name, mode)
                 yield _sse("final", cached_payload)
                 return
             if budget.exceeded():  # 额度用完后缓存命中仍可用（不花钱），只拦新的模型调用
@@ -476,18 +533,27 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                     pass
 
             def pump():
+                on_delta = lambda text: put(("delta", {"text": text}))  # noqa: E731
                 try:
-                    for kind, item, extra in agent_.ask_stream(
-                        question,
-                        generate_chart=chart,
-                        user_id=user,
-                        on_answer_delta=lambda text: put(("delta", {"text": text})),
-                        allow_clarify=clarify,
-                        handle=handle,
-                        interactive=True,
-                        history=history,
-                    ):
-                        put(("node", _node_event(item, extra or {})) if kind == "node" else ("outcome", item))
+                    if mode == "analyze":
+                        events = agent_.analyst.analyze_stream(
+                            question, user_id=user, history=history, on_answer_delta=on_delta, handle=handle
+                        )
+                        to_event = _analysis_event
+                    else:
+                        events = agent_.ask_stream(
+                            question,
+                            generate_chart=chart,
+                            user_id=user,
+                            on_answer_delta=on_delta,
+                            allow_clarify=clarify,
+                            handle=handle,
+                            interactive=True,
+                            history=history,
+                        )
+                        to_event = _node_event
+                    for kind, item, extra in events:
+                        put(("node", to_event(item, extra or {})) if kind == "node" else ("outcome", item))
                 except RunCancelled:
                     REQUESTS.labels(status="cancelled").inc()
                 except BaseException as e:  # noqa: BLE001 —— 原样转交给请求协程抛出
@@ -502,7 +568,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                     put(("end", None))
 
             threading.Thread(target=pump, daemon=True).start()
-            outcome: RunOutcome | None = None
+            outcome: RunOutcome | AnalysisOutcome | None = None
             try:
                 while True:
                     try:
@@ -530,12 +596,12 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                 # 通知工作线程停下，不再继续调用模型
                 handle.cancel()
             assert outcome is not None
-            payload = _outcome_payload(outcome)
+            payload = _analysis_payload(outcome) if mode == "analyze" else _outcome_payload(outcome)
             REQUESTS.labels(status=outcome.status).inc()
             LATENCY.observe(time.monotonic() - start)
             if outcome.hallucination_blocked:
                 HALLUCINATION_BLOCKED.inc()
-            record_run(user, question, payload, history, agent_.llm.model_name)
+            record_run(user, question, payload, history, agent_.llm.model_name, mode)
             if outcome.succeeded:
                 cache.set(key, payload)
             yield _sse("final", payload)

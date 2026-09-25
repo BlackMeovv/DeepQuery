@@ -120,6 +120,7 @@ class _State(TypedDict, total=False):
     probed: list[str]  # 已查过取值的 表.列，避免重复查
     step_detail: str  # 本节点对外展示的补充说明（如"展开了哪些表"），只随本节点的事件发出
     small_talk: str | None  # 整句寒暄的类型（intro / thanks）：不调用模型直接回复
+    allow_meta: bool  # 允许不查数据直接回答（口径 / 表结构 / 闲聊）；分析模式的子查询关闭
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -317,7 +318,17 @@ class DeepQuery:
         self._glossary = load_glossary(glossary_path)
         self._examples = load_examples(examples_path)
         self._sandbox = None  # 图表沙箱按需构建
+        self._analyst = None  # 分析模式按需构建
         self._graph = self._build_graph()
+
+    @property
+    def analyst(self):
+        """分析模式（多步查询 + 带出处的结论），首次用到时构建。"""
+        if self._analyst is None:
+            from .analyst import Analyst
+
+            self._analyst = Analyst(self)
+        return self._analyst
 
     @property
     def allowed_tables(self) -> set[str]:
@@ -449,15 +460,20 @@ class DeepQuery:
         allow_clarify: bool = False,
         interactive: bool = False,
         history: list[dict] | None = None,
+        meter: UsageMeter | None = None,
+        allow_meta: bool = True,
     ) -> RunOutcome:
         """回答一个自然语言问题。generate_answer=False 时跳过总结节点（评测省成本）；
         generate_chart=True 时对成功结果生成图表（模型写代码 → 沙箱执行）；
         allow_clarify=True 时问题有歧义或数据缺失会返回 needs_clarification（交互场景用，
         评测保持关闭，提示词与历史评测一致）。
-        history：同一会话之前几轮的 [{question, sql, answer}]（旧的在前），支持"那…呢"这类追问。"""
+        history：同一会话之前几轮的 [{question, sql, answer}]（旧的在前），支持"那…呢"这类追问。
+        meter：传入时和调用方共用预算与取消开关（分析模式的各个子查询共用一个）。
+        allow_meta=False：必须查数据，不走"依据表结构直接回答"和寒暄（分析模式的子查询）。"""
         start = time.monotonic()
         state, meter, trace, selected_tables, context_used = self._prepare_run(
-            question, generate_answer, generate_chart, user_id, allow_clarify, interactive, history
+            question, generate_answer, generate_chart, user_id, allow_clarify, interactive, history,
+            meter=meter, allow_meta=allow_meta,
         )
         try:
             final: dict = self._graph.invoke(state, config=self._run_config())
@@ -524,15 +540,12 @@ class DeepQuery:
         allow_clarify: bool = False,
         interactive: bool = False,
         history: list[dict] | None = None,
+        meter: UsageMeter | None = None,
+        allow_meta: bool = True,
     ):
         self.maybe_refresh_schema()  # 建/改表后无需重启即生效（CLI/MCP/服务共用此入口）
         snap = self._snap  # 本次运行全程只用这一份快照
-        meter = UsageMeter(
-            price_input_per_m=self.settings.llm_price_input_per_m,
-            price_output_per_m=self.settings.llm_price_output_per_m,
-            max_tokens=self.settings.agent_max_tokens_per_run,
-            max_cost=self.settings.agent_max_cost_per_run,
-        )
+        meter = meter or self.new_meter()
         trace = self.tracer.start_run(question)
         # 追问常常省略主语（"那按月呢"）：检索口径、例句和记忆时带上上一轮的问题
         turns = [t for t in (history or []) if t.get("question")]
@@ -554,7 +567,8 @@ class DeepQuery:
             "expanded_tables": [],
             "value_notes": [],
             "probed": [],
-            "small_talk": smalltalk.kind(question) if interactive else None,
+            "small_talk": smalltalk.kind(question) if interactive and allow_meta else None,
+            "allow_meta": allow_meta,
             "attempts": [],
             "generate_answer": generate_answer,
             "generate_chart": generate_chart,
@@ -566,6 +580,15 @@ class DeepQuery:
             "conversation": prompts.format_history(turns),
         }
         return state, meter, trace, selected_tables, context_used
+
+    def new_meter(self, factor: float = 1.0) -> UsageMeter:
+        """一次运行的计量器；factor 放大预算上限（分析模式要跑好几条查询）。"""
+        return UsageMeter(
+            price_input_per_m=self.settings.llm_price_input_per_m,
+            price_output_per_m=self.settings.llm_price_output_per_m,
+            max_tokens=int(self.settings.agent_max_tokens_per_run * factor),
+            max_cost=self.settings.agent_max_cost_per_run * factor,
+        )
 
     def _finish_run(
         self,
@@ -784,7 +807,8 @@ class DeepQuery:
         system = self._sql_system(state)
         if state.get("allow_clarify"):
             system += prompts.CLARIFY_RULES
-        if state.get("interactive"):
+        allow_meta = state.get("interactive") and state.get("allow_meta", True)
+        if allow_meta:
             system += prompts.META_RULES
         messages = [
             {"role": "system", "content": system},
@@ -809,7 +833,7 @@ class DeepQuery:
                         "answer": clarification["question"],
                         "thought": thought,
                     }
-            meta = extract_meta_answer(reply.text) if state.get("interactive") and round_ == 0 else None
+            meta = extract_meta_answer(reply.text) if allow_meta and round_ == 0 else None
             if meta is None:
                 return {"candidate_sql": extract_sql(reply.text), "thought": thought}
             # 不查数据的回答有两道检查，不过就退回去让模型写 SQL 查：

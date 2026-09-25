@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     agent_max_repair_rounds: int = 3
     agent_max_tokens_per_run: int = 200_000
     agent_max_cost_per_run: float = 0.05
+    # 分析模式：先拆几步、最多几步（含看完结果后追加的下钻），整次分析的预算是单次提问的几倍
+    analysis_plan_steps: int = 4
+    analysis_max_steps: int = 6
+    analysis_budget_factor: float = 4.0
 
     # 表结构怎么交给模型：
     #   off=全量直供 / on=检索选表（BM25 + 可选向量）/ disclose=渐进式披露（先给表目录，模型选表后再展开）

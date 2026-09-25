@@ -99,12 +99,12 @@ class LLMClient(BaseLLM):
                 latency_ms = int((time.monotonic() - start) * 1000)
                 prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
                 completion_tokens = getattr(usage, "completion_tokens", 0) or 0
-                if prompt_tokens == 0 and completion_tokens == 0:
+                unmetered = prompt_tokens == 0 and completion_tokens == 0
+                if unmetered:
                     # 上游不回 usage 时按字符保守估算——预算熔断不允许静默失效
                     prompt_tokens = estimate_tokens(str(m.get("content", "")) for m in messages)
                     completion_tokens = max(1, estimate_tokens([text]))
-                    meter.unmetered_calls += 1
-                meter.add(prompt_tokens, completion_tokens, tag=tag)
+                meter.add(prompt_tokens, completion_tokens, tag=tag, unmetered=unmetered)
                 return LLMReply(text, prompt_tokens, completion_tokens, latency_ms)
             except (RateLimitError, APITimeoutError, APIConnectionError) as e:
                 last_error = e
@@ -157,11 +157,11 @@ class LLMClient(BaseLLM):
                     on_delta("".join(parts))
         except RunCancelled:
             stream.close()
-            meter.unmetered_calls += 1
             meter.add(
                 estimate_tokens(str(m.get("content", "")) for m in messages),
                 estimate_tokens(parts),
                 tag=tag,
+                unmetered=True,
             )
             raise
         if not parts and usage is None:

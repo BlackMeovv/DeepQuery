@@ -82,6 +82,33 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     return 0 if outcome.succeeded else 1
 
 
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    from . import build_agent
+
+    agent = build_agent(_override_db(args))
+    outcome = agent.analyst.analyze(args.question, user_id=args.user)
+    if outcome.plan_thought:
+        console.print(f"[dim]思路：{escape(outcome.plan_thought)}[/dim]")
+    for s in outcome.steps:
+        head = f"[{s['no']}] {s['question']}"
+        if s.get("result") is None:
+            console.print(Panel(Text(s.get("error") or "没有结果"), title=head, border_style="red"))
+            continue
+        res = s["result"]
+        table = Table(*[Text(c) for c in res.columns], title=Text(s.get("predicted_sql") or s.get("sql") or ""))
+        for row in res.rows[:8]:
+            table.add_row(*[Text("NULL" if v is None else str(v)) for v in row])
+        console.print(Panel(table, title=head, border_style="cyan"))
+    console.print(Panel(Text(outcome.answer), title="结论", border_style="green" if outcome.succeeded else "yellow"))
+    usage = outcome.usage
+    console.print(
+        f"[dim]状态 {outcome.status} · {len(outcome.steps)} 步 · LLM 调用 {usage.get('llm_calls', 0)} 次 · "
+        f"成本 {usage.get('cost', 0):.6f} · 耗时 {outcome.latency_ms} ms"
+        + (" · 结论数字对不上出处，已改为列出结果" if outcome.hallucination_blocked else "") + "[/dim]"
+    )
+    return 0 if outcome.succeeded else 1
+
+
 def _cmd_schema(args: argparse.Namespace) -> int:
     from .tools.engines import open_database
 
@@ -287,6 +314,12 @@ def main() -> None:
         help="连接任意库：SQLite 文件路径，或 mysql:// / postgres:// 连接串（默认 .env 的 DB_PATH）",
     )
     ask.set_defaults(func=_cmd_ask)
+
+    analyze = sub.add_parser("analyze", help='分析模式：拆成几步查询再写带出处的结论，如 analyze "为什么 3 月销售额下降了"')
+    analyze.add_argument("question")
+    analyze.add_argument("--db", default=None, help="连接任意 SQLite 库文件")
+    analyze.add_argument("--user", default="default")
+    analyze.set_defaults(func=_cmd_analyze)
 
     schema = sub.add_parser("schema", help="查看喂给模型的 schema 上下文")
     schema.add_argument("--db", default=None, help="连接任意 SQLite 库文件")

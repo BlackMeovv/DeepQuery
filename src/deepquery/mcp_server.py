@@ -55,6 +55,28 @@ def ask_data(question: str, user: str = "default") -> dict[str, Any]:
     }
 
 
+def analyze_data(question: str, user: str = "default") -> dict[str, Any]:
+    """多步分析（适合"为什么下降""哪些因素影响"这类问题）：拆成几步查询，查完写结论。
+
+    结论里每句用 [n] 标注出自第几步，数字已逐句核对来自所标注步骤的查询结果；steps 里是每一步的 SQL 和结果预览。
+    """
+    outcome = _get_agent().analyst.analyze(question, user_id=user)
+    return {
+        "status": outcome.status,
+        "answer": outcome.answer,
+        "steps": [
+            {
+                "no": s["no"],
+                "question": s["question"],
+                "sql": s.get("predicted_sql") or s.get("sql"),
+                "result_preview": s["result"].preview(max_rows=10) if s.get("result") else s.get("error"),
+            }
+            for s in outcome.steps
+        ],
+        "usage": outcome.usage,
+    }
+
+
 def run_sql(sql: str) -> dict[str, Any]:
     """直接执行一条只读 SQL（经过与主链路相同的安全守卫）。"""
     agent = _get_agent()
@@ -107,6 +129,7 @@ def create_mcp_server():
 
     server = ServerClass("deepquery")
     server.tool()(ask_data)
+    server.tool()(analyze_data)
     server.tool()(run_sql)
     server.tool()(get_schema)
     server.tool()(remember_preference)

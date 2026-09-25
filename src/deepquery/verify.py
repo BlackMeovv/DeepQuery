@@ -103,3 +103,61 @@ def _checkable(answer: str) -> list:
 def checked_number_count(answer: str) -> int:
     """回答里需要核对出处的数字个数（通过校验的回答里，这些数字都能在结果/问题/SQL 中找到）。"""
     return len(_checkable(answer or ""))
+
+
+# ---------- 分析报告：逐句核对"数字出自所引用的那一步" ----------
+
+_CITE = re.compile(r"\[(\d{1,2})\]")
+_LEADING_CITES = re.compile(r"^\s*((?:\[\d{1,2}\])+)")
+
+
+def _segments(text: str) -> list[str]:
+    """按句切开；句号后面紧跟的 [1] 归到前一句（"下降了 12%。[1]"）。"""
+    out: list[str] = []
+    for piece in re.split(r"(?<=[。！？；\n])", text or ""):
+        m = _LEADING_CITES.match(piece)
+        if m and out:
+            out[-1] += m.group(1)
+            piece = piece[m.end():]
+        if piece.strip():
+            out.append(piece)
+    return out
+
+
+def check_cited(
+    report: str,
+    steps: dict[int, tuple[QueryResult | None, str]],
+    question: str = "",
+) -> list[str]:
+    """分析报告的逐句溯源：带数字的句子必须标注出处步骤 [n]，数字必须出自所标注步骤的结果（或其 SQL、问题）。
+
+    steps：{步骤号: (查询结果, 该步 SQL)}，没有可用结果的步骤结果为 None。
+    比整篇报告对照所有结果更严：数字对了、步骤标错了，同样算没有出处。返回问题描述列表，空 = 通过。
+    """
+    problems: list[str] = []
+    for seg in _segments(report):
+        cites = [int(n) for n in _CITE.findall(seg)]
+        numbers = _checkable(_CITE.sub(" ", seg))
+        if not numbers:
+            continue
+        if not cites:
+            problems.extend(f"「{n.raw}」没有标注出自哪一步" for n in numbers)
+            continue
+        missing = [c for c in cites if steps.get(c, (None, ""))[0] is None]
+        if missing:
+            problems.append(f"引用的第 {'、'.join(map(str, missing))} 步没有可用的查询结果")
+            continue
+        allowed = allowed_values(None, question)
+        for c in cites:
+            result, sql = steps[c]
+            allowed.extend(allowed_values(result, "", sql))
+        label = "、".join(f"[{c}]" for c in cites)
+        problems.extend(
+            f"「{n.raw}」不在所标注的 {label} 的结果里" for n in numbers if not any(n.matches(v) for v in allowed)
+        )
+    return problems
+
+
+def cited_number_count(report: str) -> int:
+    """报告里需要核对出处的数字个数（不含 [1] 这类步骤编号）。"""
+    return len(_checkable(_CITE.sub(" ", report or "")))

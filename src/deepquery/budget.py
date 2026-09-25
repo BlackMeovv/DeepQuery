@@ -36,6 +36,8 @@ class UsageMeter:
     completion_tokens: int = 0
     by_tag: dict[str, int] = field(default_factory=dict)
     cancel_event: Any = field(default=None, repr=False, compare=False)  # threading.Event | None
+    # 分析模式里几个子查询并行跑、共用一个计量器：累加必须加锁
+    _lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -51,14 +53,16 @@ class UsageMeter:
             + self.completion_tokens * self.price_output_per_m
         ) / 1_000_000
 
-    def add(self, prompt_tokens: int, completion_tokens: int, tag: str = "") -> None:
-        self.llm_calls += 1
-        self.prompt_tokens += int(prompt_tokens or 0)
-        self.completion_tokens += int(completion_tokens or 0)
-        if tag:
-            self.by_tag[tag] = self.by_tag.get(tag, 0) + int(prompt_tokens or 0) + int(
-                completion_tokens or 0
-            )
+    def add(self, prompt_tokens: int, completion_tokens: int, tag: str = "", unmetered: bool = False) -> None:
+        with self._lock:
+            self.llm_calls += 1
+            self.unmetered_calls += 1 if unmetered else 0
+            self.prompt_tokens += int(prompt_tokens or 0)
+            self.completion_tokens += int(completion_tokens or 0)
+            if tag:
+                self.by_tag[tag] = self.by_tag.get(tag, 0) + int(prompt_tokens or 0) + int(
+                    completion_tokens or 0
+                )
 
     def exceeded(self) -> bool:
         if self.max_tokens and self.total_tokens >= self.max_tokens:
