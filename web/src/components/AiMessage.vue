@@ -45,6 +45,21 @@ const finished = computed(() => props.msg.status === "done" || props.msg.status 
 const showSource = computed(() => finished.value && !props.msg.meta && !!props.msg.sql);
 const showMetaSource = computed(() => finished.value && !!props.msg.meta);
 
+// 反馈：👍 直接提交；👎 先选原因（可不选）再提交。只有服务端记了这次运行才显示
+const canRate = computed(() => !!props.msg.runId && props.msg.status !== "running" && props.msg.status !== "clarify");
+const asking = ref(false);
+const reason = ref("");
+const REASONS = ["数字不对", "理解错了问题", "口径不对", "结果不完整", "太慢了"];
+
+function thumbsUp() {
+  if (props.msg.rating) return;
+  store.rate(props.msg.id, "up");
+}
+async function submitDown() {
+  await store.rate(props.msg.id, "down", reason.value.trim());
+  asking.value = false;
+}
+
 function copyAnswer() {
   if (answerText.value) navigator.clipboard?.writeText(answerText.value);
 }
@@ -160,7 +175,7 @@ function copyAnswer() {
       </template>
     </div>
 
-    <ResultTable v-if="msg.columns && msg.columns.length" :msg="msg" />
+    <ResultTable v-if="msg.columns && msg.columns.length" :columns="msg.columns" :rows="msg.rows || []" :row-count="msg.rowCount || 0" />
 
     <img v-if="msg.chartUrl" class="chart" :src="msg.chartUrl" alt="chart" />
     <div v-else-if="msg.chartError" class="charterr">图表生成失败：{{ msg.chartError }}</div>
@@ -168,6 +183,27 @@ function copyAnswer() {
     <div v-if="msg.status !== 'running' && msg.status !== 'clarify'" class="foot">
       <span v-if="msg.answer" @click="copyAnswer">复制回答</span>
       <span title="强制重新执行，不走缓存" @click="store.rerun(msg.id)">重跑</span>
+      <template v-if="canRate">
+        <span v-if="msg.rating" class="rated">{{ msg.rating === "up" ? "已标记有帮助" : "已记录问题，谢谢反馈" }}</span>
+        <template v-else>
+          <span class="thumb" title="有帮助" @click="thumbsUp">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3Zm0 0 4-7a2.5 2.5 0 0 1 3 2.6L13.4 9H19a2 2 0 0 1 2 2.3l-1.3 7.6A2.5 2.5 0 0 1 17.2 21H7"/></svg>
+          </span>
+          <span class="thumb" :class="{ on: asking }" title="有问题" @click="asking = !asking">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 14V3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-3Zm0 0-4 7a2.5 2.5 0 0 1-3-2.6l.6-3.4H5a2 2 0 0 1-2-2.3l1.3-7.6A2.5 2.5 0 0 1 6.8 3H17"/></svg>
+          </span>
+        </template>
+      </template>
+    </div>
+    <div v-if="asking && !msg.rating" class="fbbox">
+      <div class="fbtitle">哪里不对？（可以不选，直接提交）</div>
+      <div class="fbchips">
+        <span v-for="r in REASONS" :key="r" class="fbchip" :class="{ on: reason === r }" @click="reason = reason === r ? '' : r">{{ r }}</span>
+      </div>
+      <div class="fbrow">
+        <input v-model="reason" class="fbinput" maxlength="200" placeholder="或者写一句具体的问题" @keydown.enter="submitDown" />
+        <button class="fbsend" @click="submitDown">提交</button>
+      </div>
     </div>
   </div>
 </template>
@@ -240,4 +276,30 @@ function copyAnswer() {
 .foot { display: flex; gap: 16px; font-size: 12.5px; color: var(--ink3); }
 .foot span { cursor: pointer; }
 .foot span:hover { color: var(--accink); }
+.foot .thumb { display: inline-flex; align-items: center; }
+.foot .thumb.on { color: var(--err); }
+.foot .rated { cursor: default; color: var(--acc2ink); }
+.foot .rated:hover { color: var(--acc2ink); }
+.fbbox {
+  margin-top: -6px; padding: 12px 14px; border-radius: var(--r-md); background: var(--soft);
+  display: flex; flex-direction: column; gap: 9px; animation: fadeUp 0.2s ease;
+}
+.fbtitle { font-size: 12.5px; color: var(--ink2); }
+.fbchips { display: flex; flex-wrap: wrap; gap: 7px; }
+.fbchip {
+  font-size: 12px; padding: 3px 11px; border-radius: 999px; cursor: pointer;
+  background: var(--paper); color: var(--ink2); border: 1px solid var(--line);
+}
+.fbchip.on { background: var(--errbg); color: var(--err); border-color: transparent; }
+.fbrow { display: flex; gap: 8px; }
+.fbinput {
+  flex: 1; font: inherit; font-size: 13px; padding: 6px 11px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--paper); color: var(--ink); outline: none;
+}
+.fbinput:focus { border-color: var(--accink); }
+.fbsend {
+  font: inherit; font-size: 12.5px; padding: 0 14px; border-radius: 10px; border: none; cursor: pointer;
+  background: var(--acc); color: var(--paper); font-weight: 600;
+}
+.fbsend:hover { filter: brightness(0.94); }
 </style>

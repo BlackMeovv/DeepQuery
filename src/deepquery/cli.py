@@ -128,6 +128,43 @@ def _memory_store():
     return MemoryStore(get_settings().memory_db_path)
 
 
+def _run_log():
+    from .config import get_settings
+    from .runlog import RunLog
+
+    settings = get_settings()
+    if not settings.run_log_path:
+        console.print("[yellow]RUN_LOG_PATH 为空，服务没有记录运行[/yellow]")
+        return None
+    return RunLog(settings.run_log_path, settings.run_log_keep)
+
+
+def _cmd_runs(args: argparse.Namespace) -> int:
+    log = _run_log()
+    if log is None:
+        return 1
+    s = log.stats(days=args.days)
+    rated = s["up"] + s["down"]
+    console.print(f"[bold]最近 {s['days']} 天[/bold]：{s['runs']} 次提问（缓存命中 {s['cached']} 次），花费 {s['cost']:.4f}")
+    if s["latency_p50_ms"] is not None:
+        console.print(f"延迟（不含缓存）：中位数 {s['latency_p50_ms'] / 1000:.1f}s，P95 {s['latency_p95_ms'] / 1000:.1f}s")
+    console.print("按结果：" + "，".join(f"{k} {v}" for k, v in s["by_status"].items()) if s["by_status"] else "按结果：无")
+    console.print(f"反馈：👍 {s['up']}  👎 {s['down']}" + (f"（差评占 {s['down'] / rated:.0%}）" if rated else ""))
+    for c in log.downvoted(limit=args.show)[: args.show]:
+        reason = f" — {escape(c['reason'])}" if c["reason"] else ""
+        console.print(f"  👎 [{c['created_at']}] {escape(c['question'])}{reason}")
+    return 0
+
+
+def _cmd_feedback_export(args: argparse.Namespace) -> int:
+    log = _run_log()
+    if log is None:
+        return 1
+    n = log.export_cases(args.out)
+    console.print(f"已导出 {n} 条差评到 {escape(args.out)}：逐条补上 gold_sql 后并入评测集")
+    return 0
+
+
 def _cmd_remember(args: argparse.Namespace) -> int:
     note_id = _memory_store().remember(args.user, args.note)
     console.print(f"已记住（#{note_id}）：{escape(args.note)}")
@@ -278,6 +315,15 @@ def main() -> None:
     forget.add_argument("note_id", type=int)
     forget.add_argument("--user", default="default")
     forget.set_defaults(func=_cmd_forget)
+
+    runs = sub.add_parser("runs", help="运行概况：提问次数、延迟、花费、好评差评，列出最近的差评")
+    runs.add_argument("--days", type=int, default=7)
+    runs.add_argument("--show", type=int, default=10, help="列出最近几条差评")
+    runs.set_defaults(func=_cmd_runs)
+
+    fb = sub.add_parser("feedback-export", help="把差评导出成待标注的评测用例（jsonl）")
+    fb.add_argument("--out", default="eval/cases/feedback-todo.jsonl")
+    fb.set_defaults(func=_cmd_feedback_export)
 
     args = parser.parse_args()
     try:

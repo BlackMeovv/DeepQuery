@@ -219,7 +219,23 @@ git pull && docker compose up -d --build app
 docker compose down
 ```
 
-依次是：看日志、更新代码后重建、整体下线。演示库、记忆和图表在 named volume `app-data` 里，重建不会丢。
+依次是：看日志、更新代码后重建、整体下线。演示库、记忆、图表和运行记录都在 named volume `app-data` 里，重建不会丢。
+
+看最近 7 天的运行概况（提问次数、延迟、花费、好评差评，以及最近的差评）：
+
+```bash
+docker compose exec app uv run deepquery runs
+```
+
+把差评导出成待标注的评测用例，逐条补上正确的 SQL 后并入评测集：
+
+```bash
+docker compose exec app uv run deepquery feedback-export --out data/feedback-todo.jsonl
+docker compose cp app:/app/data/feedback-todo.jsonl .
+```
+
+运行记录只存问题、SQL、回答摘要和用量，不存查询结果；超过 `RUN_LOG_KEEP` 条后自动删除最旧的。
+公网演示时访客的提问会被记下，如需告知访客，在页面说明或 `DATASET_NOTE` 里写明即可。
 
 口令外泄时：改 `.env` 里的 `DEMO_ACCESS_CODE`，再执行 `docker compose up -d app`，旧口令立即失效。
 
@@ -236,4 +252,5 @@ docker compose down
 | 模型生成的画图代码 | 在容器内以带资源限额的子进程执行，并换成独立的无权限用户：读不到服务进程环境变量里的 API Key 和数据目录，进程数有上限，结束后清理干净；产物只接受普通 PNG 文件，不跟随符号链接 |
 | 端口意外暴露 | 所有容器端口只绑定本机，对外只开 nginx 的 80 / 443；`/metrics` 禁止外部访问 |
 | 口令在网络上被截获 | HTTPS；nginx 日志不记录 URL 参数 |
+| 事后查不清谁问了什么 | 每次提问留一条运行记录（访客 ID、问题、SQL、状态、耗时、花费），`deepquery runs` 查看概况 |
 | 只想公开部分数据 | `.env` 中 `ALLOWED_TABLES=orders,products`，模型看不到也查不了其余的表 |

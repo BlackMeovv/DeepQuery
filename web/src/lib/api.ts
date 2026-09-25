@@ -113,6 +113,7 @@ export interface FinalPayload {
   source_tables?: string[]; // 回答依据的数据来自哪几张表
   numbers_verified?: number; // 回答中核对过出处的数字个数
   sql_summary?: string[]; // 口径说明（从 SQL 语法树生成）：筛选 / 分组 / 排序 / 条数
+  run_id?: string | null; // 这次运行的编号，打分时带回
   chart_url: string | null;
   chart_error: string | null;
   clarification?: Clarification | null;
@@ -147,6 +148,19 @@ export async function addMemory(note: string, user = userId): Promise<number> {
 
 export async function deleteMemory(id: number, user = userId): Promise<void> {
   await fetch(`/api/memory/${id}?user=${encodeURIComponent(user)}${codeQS()}`, { method: "DELETE" });
+}
+
+/** 给某次运行打分；差评可附一句原因。失败时抛出带原因的错误。 */
+export async function sendFeedback(runId: string, rating: "up" | "down", reason = "", user = userId): Promise<void> {
+  const resp = await fetch("/api/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: runId, rating, reason, user, code: accessCode || null }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.detail || `反馈没有提交成功（HTTP ${resp.status}）`);
+  }
 }
 
 export interface AskCallbacks {

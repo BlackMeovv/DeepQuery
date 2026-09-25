@@ -24,6 +24,7 @@ def settings(demo_db_path, tmp_path):
         _env_file=None,
         db_path=str(demo_db_path),
         memory_db_path=str(tmp_path / "memory.sqlite"),
+        run_log_path=str(tmp_path / "runs.sqlite"),
         chart_out_dir=str(tmp_path / "charts"),
         web_dist=str(tmp_path / "no-dist"),  # 测试默认走内置后备页，不受本地构建产物影响
     )

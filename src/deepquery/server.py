@@ -6,6 +6,7 @@
     GET  /                     演示网页（无前端框架，单文件）
     POST /api/ask              SSE：逐节点进度 + 最终结果（JSON 请求体，可带之前几轮对话，支持追问）
     GET  /api/ask?question=…&chart=0|1   同上的简化版（不带对话上下文；旧版单文件页使用）
+    POST /api/feedback         对某次运行打分（👍/👎 + 可选原因），差评可导出成评测用例
     GET  /charts/{name}        沙箱生成的图表文件
     GET  /metrics              Prometheus 指标
     GET  /healthz
@@ -22,6 +23,7 @@ import re
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
@@ -35,12 +37,14 @@ from .cache import BaseCache, build_cache, cache_key
 from .config import Settings, get_settings
 from .guard import tables_in_sql
 from .ratelimit import DailyBudget, SlidingWindowLimiter
+from .runlog import RunLog
 
 # ---------- Prometheus 指标 ----------
 
 REQUESTS = Counter("deepquery_requests_total", "请求总数（按结果状态）", ["status"])
 CACHE_HITS = Counter("deepquery_cache_hits_total", "结果缓存命中数")
 HALLUCINATION_BLOCKED = Counter("deepquery_hallucination_blocked_total", "防幻觉拦截次数")
+FEEDBACK = Counter("deepquery_feedback_total", "用户反馈次数", ["rating"])
 LATENCY = Histogram(
     "deepquery_request_seconds",
     "单次提问端到端延迟",
@@ -93,6 +97,14 @@ def history_scope(history: list[dict]) -> str:
         return ""
     blob = json.dumps(history, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+class FeedbackBody(BaseModel):
+    run_id: str = Field(min_length=8, max_length=64)
+    rating: Literal["up", "down"]
+    reason: str = Field(default="", max_length=200)
+    user: str = Field(default="default", max_length=64)
+    code: str | None = Field(default=None, max_length=64)
 
 
 class MemoryNote(BaseModel):
@@ -148,7 +160,7 @@ def _notice_payload(message: str) -> dict:
         "predicted_sql": None, "columns": [], "rows": [], "row_count": 0, "attempts": [],
         "selected_tables": None, "context_used": None, "hallucination_blocked": False,
         "chart_url": None, "chart_error": None, "clarification": None,
-        "source_tables": [], "numbers_verified": 0, "sql_summary": [],
+        "source_tables": [], "numbers_verified": 0, "sql_summary": [], "run_id": None,
         "usage": {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}, "latency_ms": 0,
     }
 
@@ -205,6 +217,29 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
     limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
     budget = DailyBudget(settings.daily_cost_limit)
     run_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_runs))
+    feedback_limiter = SlidingWindowLimiter(30, 60.0)  # 反馈单独限流，不占提问的额度
+    runlog_holder: dict = {"log": None}
+    runlog_lock = threading.Lock()
+
+    def run_log() -> RunLog | None:
+        """首次用到时才打开（只看 /healthz 的场景不建文件）；RUN_LOG_PATH 留空则不记录。"""
+        if not settings.run_log_path:
+            return None
+        if runlog_holder["log"] is None:
+            with runlog_lock:
+                if runlog_holder["log"] is None:
+                    runlog_holder["log"] = RunLog(settings.run_log_path, settings.run_log_keep)
+        return runlog_holder["log"]
+
+    def record_run(user: str, question: str, payload: dict, history: list[dict], model: str) -> None:
+        """记一次运行，把 run_id 放进结果里（前端反馈时带回）。记录失败不影响回答。"""
+        log = run_log()
+        if log is None:
+            return
+        try:
+            payload["run_id"] = log.record(user=user, question=question, payload=payload, history=history, model=model)
+        except Exception:  # noqa: BLE001
+            logger.warning("运行记录写入失败", exc_info=True)
 
     def client_key(request: Request) -> str:
         if settings.trust_proxy_headers:
@@ -349,6 +384,19 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             [t.model_dump() for t in body.history],
         )
 
+    @app.post("/api/feedback")
+    def api_feedback(request: Request, body: FeedbackBody):
+        require_code(body.code)
+        if not feedback_limiter.hit(client_key(request)):
+            raise HTTPException(status_code=429, detail="操作太频繁了，请稍后再试")
+        log = run_log()
+        if log is None:
+            raise HTTPException(status_code=404, detail="服务没有开启运行记录")
+        if not log.feedback(body.run_id, body.user, body.rating, body.reason):
+            raise HTTPException(status_code=404, detail="找不到这次运行")
+        FEEDBACK.labels(rating=body.rating).inc()
+        return {"ok": True}
+
     @app.get("/api/ask")
     def api_ask(
         request: Request,
@@ -403,6 +451,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
                 # 如实报告本次请求的消耗：命中缓存 = 零模型调用、零成本
                 cached_payload["usage"] = {"llm_calls": 0, "total_tokens": 0, "cost": 0.0}
                 cached_payload["latency_ms"] = int((time.monotonic() - start) * 1000)
+                record_run(user, question, cached_payload, history, agent_.llm.model_name)
                 yield _sse("final", cached_payload)
                 return
             if budget.exceeded():  # 额度用完后缓存命中仍可用（不花钱），只拦新的模型调用
@@ -486,6 +535,7 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             LATENCY.observe(time.monotonic() - start)
             if outcome.hallucination_blocked:
                 HALLUCINATION_BLOCKED.inc()
+            record_run(user, question, payload, history, agent_.llm.model_name)
             if outcome.succeeded:
                 cache.set(key, payload)
             yield _sse("final", payload)

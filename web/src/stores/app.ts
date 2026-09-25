@@ -7,6 +7,7 @@ import {
   fetchMemory,
   fetchSchema,
   ping,
+  sendFeedback,
   setAccessCode,
   useVisitorId,
   type AskHandle,
@@ -55,6 +56,9 @@ export interface AiMsg {
   sourceTables?: string[];
   numbersVerified?: number;
   sqlSummary?: string[]; // 口径说明：筛选了什么、怎么分组排序、取多少条
+  runId?: string | null; // 服务端这次运行的编号（打分用）
+  rating?: "up" | "down"; // 用户给这次回答的评价
+  ratingReason?: string;
   clarification?: Clarification | null; // Agent 拿不准时向用户提的确认
   clarifyAnswered?: string; // 用户对这次确认给出的回答
   noClarify?: boolean; // 这是回答确认后的追问：不再允许反问（重跑时沿用）
@@ -317,6 +321,7 @@ export const useAppStore = defineStore("app", {
             sourceTables: p.source_tables ?? [],
             numbersVerified: p.numbers_verified ?? 0,
             sqlSummary: p.sql_summary ?? [],
+            runId: p.run_id ?? null,
             usage: { calls: p.usage.llm_calls, tokens: p.usage.total_tokens, cost: p.usage.cost },
             latencyMs: p.latency_ms,
           });
@@ -373,6 +378,20 @@ export const useAppStore = defineStore("app", {
       const pending = this.pendingClarify;
       if (pending) this.answerClarification(pending.id, text);
       else this.ask(text);
+    },
+
+    /** 给一条回答打分；差评可附原因。提交成功才记下，失败时提示原因。 */
+    async rate(msgId: string, rating: "up" | "down", reason = "") {
+      const m = this.msgs.find((x) => x.id === msgId) as AiMsg | undefined;
+      if (!m?.runId) return;
+      try {
+        await sendFeedback(m.runId, rating, reason);
+        m.rating = rating;
+        m.ratingReason = reason || undefined;
+        this.persist();
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "反馈没有提交成功");
+      }
     },
 
     stop() {

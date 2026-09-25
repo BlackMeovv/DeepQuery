@@ -93,6 +93,9 @@ class Settings(BaseSettings):
 
     # 跨会话记忆
     memory_db_path: str = "data/memory.sqlite"
+    # 运行记录与用户反馈（审计 + 差评导出成评测用例）；留空则不记录
+    run_log_path: str = "data/runs.sqlite"
+    run_log_keep: int = 20000  # 最多保留多少条运行记录，超出后删最旧的
 
     # SQL 守卫
     sql_timeout_seconds: float = 15
