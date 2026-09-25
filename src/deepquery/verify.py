@@ -20,6 +20,11 @@ from dataclasses import dataclass
 from .tools.contract import QueryResult
 
 _NUMBER = re.compile(r"(\d[\d,]*(?:\.\d+)?)([万亿%])?")
+# 文本单元格里哪些数字可以算"出处"：日期、带单位的短文本可以；
+# 十六进制 ID（"4244733e06e7…"里的 4244733）和长段自由文本（用户评价）不行——
+# 前者会让随手编的数字碰巧"有出处"，后者是外部用户写的内容，不能当成数据结论的依据
+_ID_LIKE = re.compile(r"^[0-9a-fA-F-]{16,}$")
+_MAX_TEXT_CELL = 40
 _SMALL_INT_WHITELIST = 12
 
 
@@ -65,7 +70,7 @@ def allowed_values(result: QueryResult | None, question: str = "", sql: str = ""
                     continue
                 if isinstance(cell, (int, float)):
                     values.append(float(cell))
-                elif isinstance(cell, str):
+                elif isinstance(cell, str) and len(cell) <= _MAX_TEXT_CELL and not _ID_LIKE.match(cell):
                     for num in extract_numbers(cell):
                         values.extend(x for x, _tol in num.candidates)
     for source in (question, sql):
