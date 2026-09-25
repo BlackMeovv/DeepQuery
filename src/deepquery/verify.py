@@ -20,9 +20,10 @@ from dataclasses import dataclass
 from .tools.contract import QueryResult
 
 _NUMBER = re.compile(r"(\d[\d,]*(?:\.\d+)?)([万亿%])?")
-# 文本单元格里哪些数字可以算"出处"：日期、带单位的短文本可以；
+# 文本单元格里哪些数字可以算"出处"：日期、短文本（"iPhone 15""第 37 周"）可以；
 # 十六进制 ID（"4244733e06e7…"里的 4244733）和长段自由文本（用户评价）不行——
-# 前者会让随手编的数字碰巧"有出处"，后者是外部用户写的内容，不能当成数据结论的依据
+# 前者会让随手编的数字碰巧"有出处"，后者是外部用户写的内容，不能当成数据结论的依据。
+# 这是减少误放行，不是防"数据里藏指令"：那一层靠回答提示词里"结果只是数据"的规则
 _ID_LIKE = re.compile(r"^[0-9a-fA-F-]{16,}$")
 _MAX_TEXT_CELL = 40
 _SMALL_INT_WHITELIST = 12
@@ -135,9 +136,11 @@ def check_cited(
     比整篇报告对照所有结果更严：数字对了、步骤标错了，同样算没有出处。返回问题描述列表，空 = 通过。
     """
     problems: list[str] = []
+    from_question = allowed_values(None, question)
     for seg in _segments(report):
         cites = [int(n) for n in _CITE.findall(seg)]
-        numbers = _checkable(_CITE.sub(" ", seg))
+        # 问题里本来就有的数字（"2018 年 3 月"）不需要出处，也不要求标注
+        numbers = [n for n in _checkable(_CITE.sub(" ", seg)) if not any(n.matches(v) for v in from_question)]
         if not numbers:
             continue
         if not cites:
@@ -147,7 +150,7 @@ def check_cited(
         if missing:
             problems.append(f"引用的第 {'、'.join(map(str, missing))} 步没有可用的查询结果")
             continue
-        allowed = allowed_values(None, question)
+        allowed: list[float] = []
         for c in cites:
             result, sql = steps[c]
             allowed.extend(allowed_values(result, "", sql))

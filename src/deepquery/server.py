@@ -266,13 +266,18 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
     runlog_lock = threading.Lock()
 
     def run_log() -> RunLog | None:
-        """首次用到时才打开（只看 /healthz 的场景不建文件）；RUN_LOG_PATH 留空则不记录。"""
-        if not settings.run_log_path:
+        """首次用到时才打开（只看 /healthz 的场景不建文件）；RUN_LOG_PATH 留空则不记录。
+        打不开（路径不可写等）时记一条警告、之后不再尝试：记录是附加功能，不能拖垮回答。"""
+        if not settings.run_log_path or runlog_holder.get("failed"):
             return None
         if runlog_holder["log"] is None:
             with runlog_lock:
-                if runlog_holder["log"] is None:
-                    runlog_holder["log"] = RunLog(settings.run_log_path, settings.run_log_keep)
+                if runlog_holder["log"] is None and not runlog_holder.get("failed"):
+                    try:
+                        runlog_holder["log"] = RunLog(settings.run_log_path, settings.run_log_keep)
+                    except Exception:  # noqa: BLE001
+                        runlog_holder["failed"] = True
+                        logger.warning("运行记录打不开，本次启动不再记录：%s", settings.run_log_path, exc_info=True)
         return runlog_holder["log"]
 
     def record_run(user: str, question: str, payload: dict, history: list[dict], model: str, mode: str = "ask") -> None:
@@ -444,7 +449,12 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         log = run_log()
         if log is None:
             raise HTTPException(status_code=404, detail="服务没有开启运行记录")
-        if not log.feedback(body.run_id, body.user, body.rating, body.reason):
+        try:
+            found = log.feedback(body.run_id, body.user, body.rating, body.reason)
+        except Exception:  # noqa: BLE001
+            logger.warning("反馈写入失败", exc_info=True)
+            raise HTTPException(status_code=503, detail="反馈暂时没法保存，请稍后再试") from None
+        if not found:
             raise HTTPException(status_code=404, detail="找不到这次运行")
         FEEDBACK.labels(rating=body.rating).inc()
         return {"ok": True}
@@ -484,17 +494,14 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         # 缓存按"记忆内容"而不是访客 ID 区分：没有记忆（或记忆相同）的访客共享同一份答案，
         # 示例问题只需付一次钱；有私有记忆的访客答案可能不同，自然落到各自的键上
         # 有对话上下文时再加一段它的指纹（没有时保持原来的键，已有缓存继续有效）
-        scope = memory_scope(agent_, user)
-        if history:
-            scope += f"|h:{history_scope(history)}"
-        if mode == "analyze":
-            scope += "|analyze"
         key = cache_key(
-            f"{scope}|{question}",
+            f"{memory_scope(agent_, user)}|{question}",
             db_path=settings.db_path,
             model=agent_.llm.model_name,
             chart=chart,
             schema=agent_.maybe_refresh_schema(),
+            mode=mode,
+            history=history_scope(history),
         )
 
         async def stream():
@@ -602,7 +609,8 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
             if outcome.hallucination_blocked:
                 HALLUCINATION_BLOCKED.inc()
             record_run(user, question, payload, history, agent_.llm.model_name, mode)
-            if outcome.succeeded:
+            # 分析模式只缓存完整的结果：有步骤失败、预算不够或结论降级的，下次应该重新分析
+            if outcome.succeeded and getattr(outcome, "complete", True):
                 cache.set(key, payload)
             yield _sse("final", payload)
 

@@ -120,7 +120,7 @@ def run_analysis(agent, cases: list[dict]) -> dict:
             "status": outcome.status,
             "steps": len(steps),
             "steps_ok": sum(1 for s in steps if s.get("ok")),
-            "drilled": len(steps) > len([s for s in steps if s["no"] <= agent.settings.analysis_plan_steps]),
+            "drilled": len(steps) > outcome.planned,  # 看完结果后追加了下钻步骤
             "blocked": outcome.hallucination_blocked,
             "numbers_verified": outcome.numbers_verified,
             "answer": outcome.answer,
@@ -136,6 +136,7 @@ def run_analysis(agent, cases: list[dict]) -> dict:
         "completed": _rate(sum(r["status"] == "ok" for r in results), n),
         # 结论通过逐句溯源（没有被拦下改成列结果）的比例
         "cited_ok": _rate(sum(r["status"] == "ok" and not r["blocked"] for r in results), n),
+        "drilled": _rate(sum(r["drilled"] for r in results), n),
         "step_success": _rate(sum(r["steps_ok"] for r in results), total_steps),
         "avg_steps": round(total_steps / n, 2) if n else 0,
         "avg_numbers_verified": round(sum(r["numbers_verified"] for r in results) / n, 2) if n else 0,

@@ -18,13 +18,18 @@ if TYPE_CHECKING:
     from .config import Settings
 
 
-def cache_key(question: str, *, db_path: str, model: str, chart: bool, schema: str = "") -> str:
+def cache_key(
+    question: str, *, db_path: str, model: str, chart: bool, schema: str = "", mode: str = "ask", history: str = ""
+) -> str:
     # schema 指纹入 key：建/改表后旧缓存整体作废（数据增删的时效性由 TTL 兜底）
-    payload = json.dumps(
-        {"q": question.strip(), "db": db_path, "model": model, "chart": chart, "schema": schema},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    fields = {"q": question.strip(), "db": db_path, "model": model, "chart": chart, "schema": schema}
+    # 模式、对话上下文是独立字段，不拼进问题文本：否则问题里写"…|analyze"就能撞上别的模式的缓存。
+    # 取默认值时不写入，已有缓存的键保持不变
+    if mode != "ask":
+        fields["mode"] = mode
+    if history:
+        fields["history"] = history
+    payload = json.dumps(fields, ensure_ascii=False, sort_keys=True)
     return "deepquery:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

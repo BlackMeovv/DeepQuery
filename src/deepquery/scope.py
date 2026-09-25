@@ -219,7 +219,10 @@ class _Describer:
                 if isinstance(node, exp.EQ) and isinstance(left, exp.Column) and isinstance(right, exp.Column):
                     return None  # 连接条件，不是筛选
                 if isinstance(left, exp.Literal) and not isinstance(right, exp.Literal):
+                    # "5 <= a" 读作"a 不小于 5"：交换两边时比较方向也要翻过来
                     left, right = right, left
+                    flipped = {exp.GT: exp.LT, exp.GTE: exp.LTE, exp.LT: exp.GT, exp.LTE: exp.GTE}.get(kind, kind)
+                    word, date_word = self._COMPARE[flipped]
                 verb = date_word if self._is_date(left, right) else word
                 return f"{self.name(left)} {verb} {self.value(right, left)}"
         if isinstance(node, exp.In):
@@ -231,6 +234,8 @@ class _Describer:
         if isinstance(node, exp.Like):
             pattern = node.expression.this if isinstance(node.expression, exp.Literal) else ""
             text = self._like_text(node.expression)
+            if node.args.get("negate"):  # sqlglot 把 "x NOT LIKE y" 解析成带 negate 标记的 Like
+                return f"{self.name(node.this)} 不包含 {text}"
             if pattern.startswith("%") and pattern.endswith("%"):
                 return f"{self.name(node.this)} 包含 {text}"
             if pattern.endswith("%"):

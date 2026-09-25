@@ -364,6 +364,8 @@ export const useAppStore = defineStore("app", {
             chat: p.status === "ok_chat",
             sql: p.sql,
             rawSql: p.predicted_sql,
+            // 以服务端为准：打开分析模式时说"你好"，服务端会按普通回复处理
+            mode: p.mode === "analyze" ? "analyze" : undefined,
             ...(p.mode === "analyze"
               ? { plan: (p.steps || []).map(toPlanStep), planThought: p.plan_thought, reviewNote: p.review_note }
               : {}),

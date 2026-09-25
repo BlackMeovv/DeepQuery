@@ -149,8 +149,15 @@ def extract_sql(text: str) -> str:
     return candidate.strip().rstrip(";").strip()
 
 
+_STRING_LITERAL = re.compile(r"('(?:[^']|'')*')")
+
+
 def normalize_sql(sql: str) -> str:
-    return re.sub(r"\s+", " ", (sql or "").strip().rstrip(";")).lower()
+    """比较两条 SQL 是否"一样"：忽略空白和关键字大小写，但保留字符串字面量的大小写——
+    'Completed' 和 'completed' 查出来的结果不同，修复轮只改了取值大小写不能算"原样重发"。"""
+    text = re.sub(r"\s+", " ", (sql or "").strip().rstrip(";"))
+    parts = _STRING_LITERAL.split(text)
+    return "".join(p if i % 2 else p.lower() for i, p in enumerate(parts))
 
 
 def extract_thought(text: str) -> str:

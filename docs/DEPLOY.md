@@ -234,7 +234,8 @@ docker compose exec app uv run deepquery feedback-export --out data/feedback-tod
 docker compose cp app:/app/data/feedback-todo.jsonl .
 ```
 
-运行记录只存问题、SQL、回答摘要和用量，不存查询结果；超过 `RUN_LOG_KEEP` 条后自动删除最旧的。
+运行记录存问题、SQL、回答文本和用量，不单独存查询结果（回答被降级为结果预览时，预览会随回答一起存下）；
+超过 `RUN_LOG_KEEP` 条后自动删除最旧的。
 公网演示时访客的提问会被记下，如需告知访客，在页面说明或 `DATASET_NOTE` 里写明即可。
 
 口令外泄时：改 `.env` 里的 `DEMO_ACCESS_CODE`，再执行 `docker compose up -d app`，旧口令立即失效。
