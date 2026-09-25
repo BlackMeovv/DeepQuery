@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     schema_disclose_max_tables: int = 8  # 渐进式披露一次最多展开几张表
     # 查询返回空结果时，自动查出过滤列真实出现过的取值交给修复轮（关掉可做消融）
     repair_value_probe: bool = True
+    # 多候选投票（自洽性）：1 = 关闭。≥2 时先多采样一条 SQL，两条执行结果一致就采用；
+    # 不一致再补采样到这个上限，按执行结果多数决。每题多花 1 次（一致时）到 N-1 次模型调用
+    sql_candidates: int = 1
+    sql_vote_temperature: float = 0.7
     # 业务字典 / few-shot 例句（jsonl，选填；路径不存在则自动跳过）。
     # 保持默认值时跟随数据集：Olist 库自动改用 eval/knowledge/olist/ 下的口径
     glossary_path: str = "eval/knowledge/glossary.jsonl"

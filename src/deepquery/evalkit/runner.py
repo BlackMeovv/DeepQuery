@@ -143,6 +143,7 @@ def run_eval(
                 "executed_sql": outcome.final_sql,
                 "attempts": len(outcome.attempts),
                 "error_kinds": [a.error_kind for a in outcome.attempts if not a.ok],
+                "vote": getattr(outcome, "vote", None),  # 多候选投票：{candidates, agree}
             }
             if score.match:
                 matched += 1

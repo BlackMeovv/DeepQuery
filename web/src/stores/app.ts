@@ -337,8 +337,11 @@ export const useAppStore = defineStore("app", {
           if (e.node === "generate_sql" || e.node === "repair") {
             // 一次模型调用里先想后写：拆成"思考"和"生成 SQL"两步展示；只想不写（要向你确认）时没有第二步
             const first = e.node === "repair" ? "分析失败原因" : "理解问题";
-            if (e.thought || e.detail || !e.sql) m.steps.push({ label: first, thought: e.thought, detail: e.detail, state: "ok" });
-            if (e.sql) m.steps.push({ label: e.node === "repair" ? "改写 SQL" : "生成 SQL", sql: e.sql, state: "ok" });
+            // 补充说明：修复前的观察（查了哪些取值、补看了哪些表）跟着"分析失败原因"；
+            // 写 SQL 时的投票情况跟着"生成 SQL"
+            const onSql = e.node === "generate_sql" && !!e.sql;
+            if (e.thought || (e.detail && !onSql) || !e.sql) m.steps.push({ label: first, thought: e.thought, detail: onSql ? undefined : e.detail, state: "ok" });
+            if (e.sql) m.steps.push({ label: e.node === "repair" ? "改写 SQL" : "生成 SQL", sql: e.sql, detail: onSql ? e.detail : undefined, state: "ok" });
             return;
           }
           m.steps.push({

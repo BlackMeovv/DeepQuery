@@ -14,7 +14,7 @@ class RoutedLLM(BaseLLM):
         self.default = default
         self.calls: list[list[dict]] = []
 
-    def chat(self, messages, meter, tag="", on_delta=None) -> LLMReply:
+    def chat(self, messages, meter, tag="", on_delta=None, temperature=None) -> LLMReply:
         meter.check()
         self.calls.append(messages)
         haystack = messages[0]["content"] + "\n" + messages[-1]["content"]

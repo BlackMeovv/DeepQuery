@@ -51,8 +51,11 @@ def estimate_tokens(texts) -> int:
 class BaseLLM:
     model_name: str = "unknown"
 
-    def chat(self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None) -> LLMReply:
+    def chat(
+        self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None, temperature: float | None = None
+    ) -> LLMReply:
         """on_delta: 可选的流式回调，每收到一段增量就以「当前累积全文」调用一次。
+        temperature: 覆盖默认采样温度（多候选投票要换温度采样出不同的 SQL）。
         实现方保证：无论是否流式，返回值语义完全一致。"""
         raise NotImplementedError
 
@@ -73,9 +76,12 @@ class LLMClient(BaseLLM):
             max_retries=0,  # 重试策略自己控制，便于记录与退避
         )
 
-    def chat(self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None) -> LLMReply:
+    def chat(
+        self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None, temperature: float | None = None
+    ) -> LLMReply:
         meter.check()
         settings = self._settings
+        temp = settings.llm_temperature if temperature is None else temperature
         delay = 2.0
         last_error: Exception | None = None
         for attempt in range(settings.llm_max_retries + 1):
@@ -84,12 +90,12 @@ class LLMClient(BaseLLM):
             start = time.monotonic()
             try:
                 if on_delta is not None:
-                    text, usage = self._chat_streaming(messages, on_delta, meter, tag)
+                    text, usage = self._chat_streaming(messages, on_delta, meter, tag, temp)
                 else:
                     resp = self._client.chat.completions.create(
                         model=settings.llm_model,
                         messages=messages,
-                        temperature=settings.llm_temperature,
+                        temperature=temp,
                     )
                     choices = getattr(resp, "choices", None)
                     if not choices:
@@ -124,7 +130,7 @@ class LLMClient(BaseLLM):
                 delay *= 2
         raise LLMError(f"LLM 调用重试 {settings.llm_max_retries} 次后仍失败: {last_error}") from last_error
 
-    def _chat_streaming(self, messages: list[dict], on_delta, meter: UsageMeter, tag: str = ""):
+    def _chat_streaming(self, messages: list[dict], on_delta, meter: UsageMeter, tag: str = "", temperature=None):
         """流式调用：逐块累积文本并回调。
 
         不传 stream_options（部分中转会 400）；多数 OpenAI 兼容端会在末块带 usage，
@@ -135,7 +141,7 @@ class LLMClient(BaseLLM):
         stream = self._client.chat.completions.create(
             model=settings.llm_model,
             messages=messages,
-            temperature=settings.llm_temperature,
+            temperature=settings.llm_temperature if temperature is None else temperature,
             stream=True,
         )
         parts: list[str] = []
@@ -184,7 +190,9 @@ class MockLLM(BaseLLM):
         # 服务 mock 模式（cycle）会长期运行：只保留最近的调用，避免内存随请求数增长
         self.calls: list[list[dict]] | deque = deque(maxlen=200) if cycle else []
 
-    def chat(self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None) -> LLMReply:
+    def chat(
+        self, messages: list[dict], meter: UsageMeter, tag: str = "", on_delta=None, temperature: float | None = None
+    ) -> LLMReply:
         meter.check()
         self.calls.append(messages)
         if self._cycle:

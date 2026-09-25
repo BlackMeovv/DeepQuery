@@ -26,6 +26,8 @@ import re
 import sys
 import threading
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -36,7 +38,7 @@ from .. import disclosure, scope, smalltalk
 from ..budget import BudgetExceeded, RunHandle, UsageMeter
 from ..config import Settings
 from ..datasets import for_db, knowledge_paths
-from ..guard import tables_in_sql, validate
+from ..guard import GuardVerdict, tables_in_sql, validate
 from ..llm import BaseLLM, LLMError
 from ..retrieval import SchemaRetriever, build_embedder, load_examples, load_glossary
 from ..sandbox import build_sandbox
@@ -76,6 +78,7 @@ class RunOutcome:
     chart_path: str | None = None  # 沙箱生成的图表文件（未请求/失败时为 None）
     chart_error: str | None = None
     clarification: dict | None = None  # 需要向用户确认时：{question, term, options}
+    vote: dict | None = None  # 多候选投票：{candidates, agree}（未开启时为 None）
     sql_summary: list[str] = field(default_factory=list)  # 口径说明：筛选 / 分组 / 排序 / 条数
     result: QueryResult | None = None
     attempts: list[Attempt] = field(default_factory=list)
@@ -121,6 +124,8 @@ class _State(TypedDict, total=False):
     step_detail: str  # 本节点对外展示的补充说明（如"展开了哪些表"），只随本节点的事件发出
     small_talk: str | None  # 整句寒暄的类型（intro / thanks）：不调用模型直接回复
     allow_meta: bool  # 允许不查数据直接回答（口径 / 表结构 / 闲聊）；分析模式的子查询关闭
+    prefetched: dict  # 投票时已执行过的候选：规范化 SQL → (守卫改写后的 SQL, 结果)，执行节点直接复用
+    vote: dict  # 投票统计
 
 
 _CODE_BLOCK = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
@@ -621,6 +626,7 @@ class DeepQuery:
             chart_path=final.get("chart_path"),
             chart_error=final.get("chart_error"),
             clarification=final.get("clarification"),
+            vote=final.get("vote"),
             sql_summary=summary,
             result=last_ok.result if last_ok else None,
             attempts=attempts,
@@ -835,7 +841,7 @@ class DeepQuery:
                     }
             meta = extract_meta_answer(reply.text) if allow_meta and round_ == 0 else None
             if meta is None:
-                return {"candidate_sql": extract_sql(reply.text), "thought": thought}
+                return {"thought": thought, **self._pick_sql(state, messages, extract_sql(reply.text))}
             # 不查数据的回答有两道检查，不过就退回去让模型写 SQL 查：
             # 1. 问题本身得是在问口径 / 表结构，数据问题不能凭表结构作答；
             # 2. 出现的数字必须能在 schema / 口径 / 对话上下文里找到，否则就是没查数据却在报数
@@ -854,7 +860,88 @@ class DeepQuery:
                 {"role": "assistant", "content": reply.text},
                 {"role": "user", "content": nudge},
             ]
-        return {"candidate_sql": extract_sql(reply.text), "thought": thought}
+        return {"thought": thought, **self._pick_sql(state, messages, extract_sql(reply.text))}
+
+    # ---------- 多候选投票 ----------
+
+    def _pick_sql(self, state: _State, messages: list[dict], first_sql: str) -> dict:
+        if self.settings.sql_candidates <= 1:
+            return {"candidate_sql": first_sql}
+        return self._vote(state, messages, first_sql)
+
+    def _try_sql(self, state: _State, sql: str) -> tuple[str | None, QueryResult | None, tuple | None]:
+        """守卫 + 执行一条候选，返回 (改写后的 SQL, 结果, 结果签名)；签名为 None 的候选不参与投票。"""
+        verdict = validate(
+            sql,
+            allowed_tables=state.get("allowed_tables", self._snap.allowed_tables),
+            max_rows=self.settings.sql_max_rows,
+            dialect=self.db.dialect,
+        )
+        if not verdict.allowed:
+            return None, None, None
+        result = self.db.run_query(verdict.sql)
+        if not result.ok or self._impossible_filters(state, sql, result):
+            return verdict.sql, result, None
+        rows = sorted(
+            (tuple(round(v, 4) if isinstance(v, float) else v for v in row) for row in result.rows), key=repr
+        )
+        return verdict.sql, result, (len(result.columns), tuple(rows))
+
+    def _vote(self, state: _State, messages: list[dict], first_sql: str) -> dict:
+        """自适应的多候选投票：再采样一条，执行结果一致就采用；不一致再补采样到上限，按执行结果多数决。
+
+        比的是执行结果而不是 SQL 文本（写法不同、结果相同的算一票）；平票时取温度 0 的那条。
+        """
+        limit = self.settings.sql_candidates
+        meter: UsageMeter = state["meter"]
+        candidates = [first_sql]
+        runs = [self._try_sql(state, first_sql)]
+
+        def sample(n: int) -> list[str]:
+            if n <= 0:
+                return []
+            with ThreadPoolExecutor(max_workers=n) as pool:
+                futures = [
+                    pool.submit(self.llm.chat, messages, meter, "vote", None, self.settings.sql_vote_temperature)
+                    for _ in range(n)
+                ]
+                out = []
+                for f in futures:
+                    try:
+                        reply = f.result()
+                    except (BudgetExceeded, LLMError):
+                        continue
+                    self._record_generation(state, "vote", messages, reply)
+                    out.append(extract_sql(reply.text))
+                return out
+
+        for sql in sample(1):
+            candidates.append(sql)
+            runs.append(self._try_sql(state, sql))
+        agreed = len(runs) == 2 and runs[0][2] is not None and runs[0][2] == runs[1][2]
+        if not agreed:
+            for sql in sample(limit - len(candidates)):
+                candidates.append(sql)
+                runs.append(self._try_sql(state, sql))
+
+        tally = Counter(r[2] for r in runs if r[2] is not None)
+        winner, agree = 0, 0
+        if tally:
+            best = max(tally.values())
+            winner = next(i for i, r in enumerate(runs) if r[2] is not None and tally[r[2]] == best)
+            agree = best
+        prefetched = {
+            normalize_sql(sql): (final_sql, result)
+            for sql, (final_sql, result, _sig) in zip(candidates, runs)
+            if result is not None
+        }
+        info = {"candidates": len(candidates), "agree": agree}
+        self._trace(state).span("sql_vote", metadata=info)
+        detail = (
+            f"生成 {len(candidates)} 条候选 SQL，{agree} 条执行结果一致，采用多数结果"
+            if agree else f"生成 {len(candidates)} 条候选 SQL，都没有得到可用结果"
+        )
+        return {"candidate_sql": candidates[winner], "prefetched": prefetched, "vote": info, "step_detail": detail}
 
     @staticmethod
     def _route_after_generate(state: _State) -> str:
@@ -891,12 +978,18 @@ class DeepQuery:
 
     def _node_execute(self, state: _State) -> _State:
         sql_raw = state.get("candidate_sql", "")
-        verdict = validate(
-            sql_raw,
-            allowed_tables=state.get("allowed_tables", self._snap.allowed_tables),
-            max_rows=self.settings.sql_max_rows,
-            dialect=self.db.dialect,
-        )
+        prefetched = (state.get("prefetched") or {}).get(normalize_sql(sql_raw))
+        if prefetched is not None:  # 投票时已经执行过：直接复用，不再跑一遍
+            final_sql, result = prefetched
+            verdict = GuardVerdict(allowed=True, sql=final_sql)
+        else:
+            verdict = validate(
+                sql_raw,
+                allowed_tables=state.get("allowed_tables", self._snap.allowed_tables),
+                max_rows=self.settings.sql_max_rows,
+                dialect=self.db.dialect,
+            )
+            result = None
         if not verdict.allowed:
             attempt = Attempt(
                 sql_raw=sql_raw,
@@ -906,7 +999,7 @@ class DeepQuery:
                 error_message=verdict.reason,
             )
         else:
-            result = self.db.run_query(verdict.sql)
+            result = result or self.db.run_query(verdict.sql)
             attempt = Attempt(
                 sql_raw=sql_raw,
                 sql_final=verdict.sql,

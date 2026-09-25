@@ -50,6 +50,13 @@ SCHEMA_RAG=disclose make bird ROOT=~/data/bird_dev LABEL=disclose
 REPAIR_VALUE_PROBE=false make bird ROOT=~/data/bird_dev LABEL=no-value-probe
 ```
 
+多候选投票（自洽性）：先多采样一条 SQL，两条执行结果一致就采用，不一致再补采样，按执行结果多数决。
+报告里每题的 `vote` 字段记录候选数和一致票数，成本列反映多出来的调用：
+
+```bash
+SQL_CANDIDATES=3 make bird ROOT=~/data/bird_dev LABEL=vote3
+```
+
 成本参考：150 条 × 3 次重复 ≈ 450 次调用；按 DeepSeek 价格每次全流程约 0.002-0.01 元，
 一轮全量约 1-5 元。日常改动跑 `make smoke`（20 条演示库冒烟集）即可，全量留给里程碑。
 
