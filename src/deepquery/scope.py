@@ -104,6 +104,17 @@ class _Describer:
         inner = self._date_wrapped(node)
         if inner is not None:
             return self.name(inner)
+        # 取整、空值补 0 只是格式处理；差值的绝对值读作"差距"
+        if isinstance(node, (exp.Round, exp.Coalesce)):
+            return self.name(node.this)
+        if isinstance(node, exp.Abs):
+            inner = node.this.this if isinstance(node.this, exp.Paren) else node.this
+            if isinstance(inner, exp.Sub):
+                return f"{self.name(inner.this)}与{self.name(inner.expression)}的差距"
+            return f"{self.name(inner)}的绝对值"
+        for kind, word in ((exp.Sub, "减"), (exp.Add, "加"), (exp.Mul, "乘"), (exp.Div, "除以")):
+            if isinstance(node, kind):
+                return f"{self.name(node.this)}{word}{self.name(node.expression)}"
         for kind, word in ((exp.Sum, "总和"), (exp.Avg, "平均值"), (exp.Max, "最大值"), (exp.Min, "最小值")):
             if isinstance(node, kind):
                 return f"{self.name(node.this)}的{word}"

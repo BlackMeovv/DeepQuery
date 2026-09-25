@@ -65,10 +65,29 @@ export interface SchemaTable { name: string; columns: SchemaColumn[] }
 
 export interface MemoryNote { id: number; note: string; created_at: string }
 
+/** 分析模式的一步：子问题、SQL、结果（运行中 status 为 pending） */
+export interface AnalysisStep {
+  no: number;
+  question: string;
+  purpose?: string;
+  status?: string; // ok / ok_empty / failed / budget_exceeded / skipped
+  ok?: boolean;
+  sql?: string | null;
+  predicted_sql?: string | null;
+  summary?: string[];
+  columns?: string[];
+  rows?: (string | number | null)[][];
+  row_count?: number;
+  error?: string | null;
+}
+
 export interface NodeEvent {
   node: string;
   label: string;
   thought?: string;
+  steps?: AnalysisStep[]; // 分析模式 plan：拆出来的子问题
+  step?: AnalysisStep; // 分析模式 run_step：刚完成的一步
+  added?: AnalysisStep[]; // 分析模式 review：追加的下钻步骤
   sql?: string; // generate_sql / repair 节点生成的 SQL
   detail?: string; // 补充说明，如"展开 orders 的完整定义；查看 orders.status 的真实取值"
   ok?: boolean;
@@ -114,6 +133,10 @@ export interface FinalPayload {
   numbers_verified?: number; // 回答中核对过出处的数字个数
   sql_summary?: string[]; // 口径说明（从 SQL 语法树生成）：筛选 / 分组 / 排序 / 条数
   run_id?: string | null; // 这次运行的编号，打分时带回
+  mode?: "analyze"; // 分析模式的结果
+  steps?: AnalysisStep[]; // 分析模式：各步的 SQL 与结果
+  plan_thought?: string;
+  review_note?: string;
   chart_url: string | null;
   chart_error: string | null;
   clarification?: Clarification | null;
@@ -185,6 +208,7 @@ export interface AskRequest {
   fresh?: boolean; // 跳过缓存强制重跑
   clarify?: boolean; // 回答过澄清的追问传 false，避免 Agent 反复追问
   history?: HistoryTurn[]; // 旧的在前，最多 3 轮
+  mode?: "ask" | "analyze"; // analyze = 分析模式：拆成几步查询，再写带出处的结论
 }
 
 export interface AskHandle {

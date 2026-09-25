@@ -10,6 +10,7 @@ import {
   sendFeedback,
   setAccessCode,
   useVisitorId,
+  type AnalysisStep,
   type AskHandle,
   type Clarification,
   type EnvInfo,
@@ -31,6 +32,32 @@ export interface Step {
 }
 
 export interface UserMsg { id: string; role: "user"; text: string }
+
+/** 分析模式里的一步：state 由服务端的 status 映射而来，运行中为 pending */
+export interface PlanStep {
+  no: number;
+  question: string;
+  purpose?: string;
+  state: "pending" | "ok" | "empty" | "error" | "skipped";
+  sql?: string | null;
+  summary?: string[];
+  columns?: string[];
+  rows?: (string | number | null)[][];
+  rowCount?: number;
+  error?: string | null;
+}
+
+function toPlanStep(s: AnalysisStep): PlanStep {
+  const state = !s.status || s.status === "pending" ? "pending"
+    : s.status === "ok" ? "ok"
+    : s.status === "ok_empty" ? "empty"
+    : s.status === "skipped" ? "skipped" : "error";
+  return {
+    no: s.no, question: s.question, purpose: s.purpose, state,
+    sql: s.predicted_sql || s.sql, summary: s.summary, columns: s.columns, rows: s.rows,
+    rowCount: s.row_count, error: s.error,
+  };
+}
 
 export interface AiMsg {
   id: string;
@@ -65,6 +92,10 @@ export interface AiMsg {
   clarifySkipped?: boolean; // 用户选择跳过确认、改问别的
   meta?: boolean; // 问的是口径 / 表结构：依据 schema 直接回答，没有查询数据
   chat?: boolean; // 打招呼、问"你是谁"这类闲聊：直接回应，不查数据、不算进追问上下文
+  mode?: "analyze"; // 分析模式：拆成几步查询、写带出处的结论
+  plan?: PlanStep[];
+  planThought?: string;
+  reviewNote?: string;
 }
 
 export type Msg = UserMsg | AiMsg;
@@ -107,6 +138,7 @@ interface AskOptions {
   display?: string; // 对话里显示的用户消息（默认就是问题本身）
   clarify?: boolean; // 是否允许 Agent 先反问确认（默认允许）
   history?: HistoryTurn[]; // 之前几轮对话（默认取当前会话里最近完成的几轮）
+  mode?: "ask" | "analyze"; // 默认跟随输入框的"深度分析"开关
 }
 
 const CONVOS_KEY = "ia2_convos";
@@ -130,6 +162,7 @@ export const useAppStore = defineStore("app", {
     msgs: [] as Msg[],
     draft: "",
     chartOn: false,
+    analyzeOn: false, // 深度分析：拆成几步查询再下结论
     running: false,
     panelId: null as string | null,
     theme: (localStorage.getItem(THEME_KEY) || "light") as "light" | "dark",
@@ -253,6 +286,7 @@ export const useAppStore = defineStore("app", {
       if (!q || this.running) return;
       const clarify = opts.clarify ?? true;
       const history = opts.history ?? historyOf(this.msgs);
+      const mode = opts.mode ?? (this.analyzeOn ? "analyze" : "ask");
 
       if (!this.curConvo) {
         const convo: Convo = { id: String(Date.now()), title: q.slice(0, 16), msgs: [] };
@@ -261,7 +295,10 @@ export const useAppStore = defineStore("app", {
       }
 
       const aiId = "a" + Date.now();
-      const ai: AiMsg = { id: aiId, role: "ai", q, status: "running", steps: [], chart: this.chartOn, noClarify: !clarify };
+      const ai: AiMsg = {
+        id: aiId, role: "ai", q, status: "running", steps: [], noClarify: !clarify,
+        chart: mode === "ask" && this.chartOn, mode: mode === "analyze" ? "analyze" : undefined,
+      };
       this.msgs.push({ id: "u" + Date.now(), role: "user", text: opts.display?.trim() || q });
       this.msgs.push(ai);
       this.draft = "";
@@ -274,13 +311,29 @@ export const useAppStore = defineStore("app", {
         if (m) Object.assign(m, obj);
       };
 
-      this.stream = askStream({ question: q, chart: this.chartOn, fresh: opts.fresh ?? false, clarify, history }, {
+      this.stream = askStream({ question: q, chart: !!ai.chart, fresh: opts.fresh ?? false, clarify, history, mode }, {
         onDelta: (text) => {
           const m = this.msgs.find((x) => x.id === aiId) as AiMsg;
           if (m.status === "running") m.answer = text;
         },
         onNode: (e) => {
           const m = this.msgs.find((x) => x.id === aiId) as AiMsg;
+          if (m.mode === "analyze") {
+            // 分析模式：计划 → 每一步完成 → 追加的下钻步骤，都更新到 m.plan 上
+            if (e.node === "plan") {
+              m.plan = (e.steps || []).map(toPlanStep);
+              m.planThought = e.thought;
+            } else if (e.node === "run_step" && e.step) {
+              const done = toPlanStep(e.step);
+              const i = (m.plan || []).findIndex((s) => s.no === done.no);
+              if (i >= 0) m.plan![i] = done;
+              else m.plan = [...(m.plan || []), done];
+            } else if (e.node === "review") {
+              m.reviewNote = e.thought;
+              if (e.added?.length) m.plan = [...(m.plan || []), ...e.added.map(toPlanStep)];
+            }
+            return;
+          }
           if (e.node === "generate_sql" || e.node === "repair") {
             // 一次模型调用里先想后写：拆成"思考"和"生成 SQL"两步展示；只想不写（要向你确认）时没有第二步
             const first = e.node === "repair" ? "分析失败原因" : "理解问题";
@@ -308,6 +361,9 @@ export const useAppStore = defineStore("app", {
             chat: p.status === "ok_chat",
             sql: p.sql,
             rawSql: p.predicted_sql,
+            ...(p.mode === "analyze"
+              ? { plan: (p.steps || []).map(toPlanStep), planThought: p.plan_thought, reviewNote: p.review_note }
+              : {}),
             answer: p.hallucination_blocked || needsClarify ? undefined : p.answer,
             blockedText: p.hallucination_blocked ? p.answer : undefined,
             columns: p.columns,
@@ -349,7 +405,10 @@ export const useAppStore = defineStore("app", {
       const i = this.msgs.findIndex((x) => x.id === msgId);
       const m = this.msgs[i] as AiMsg | undefined;
       if (!m || m.role !== "ai") return;
-      this.ask(m.q, { fresh: true, clarify: !m.noClarify, history: historyOf(this.msgs.slice(0, i)) });
+      this.ask(m.q, {
+        fresh: true, clarify: !m.noClarify, history: historyOf(this.msgs.slice(0, i)),
+        mode: m.mode === "analyze" ? "analyze" : "ask",
+      });
     },
 
     /**

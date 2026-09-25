@@ -18,13 +18,33 @@ function send() {
       @keydown.enter.prevent="send"
     />
     <div class="bar">
-      <div class="chart" :class="{ on: store.chartOn, off: store.running }" @click="!store.running && (store.chartOn = !store.chartOn)">
+      <div
+        class="chart"
+        :class="{ on: store.chartOn && !store.analyzeOn, off: store.running || store.analyzeOn }"
+        :title="store.analyzeOn ? '深度分析不生成图表' : '结果画成图（沙箱里执行模型写的画图代码）'"
+        @click="!store.running && !store.analyzeOn && (store.chartOn = !store.chartOn)"
+      >
         <svg class="cic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round">
           <path d="M6 20v-6M12 20V4M18 20v-9" />
         </svg>
         生成图表
       </div>
-      <span class="hint">{{ store.running ? "正在运行 · 流式接收中…" : "重复的问题会命中缓存 · Enter 发送" }}</span>
+      <div
+        class="chart"
+        :class="{ on: store.analyzeOn, off: store.running }"
+        title="适合&quot;为什么下降&quot;这类问题：拆成几步查询，再写每句都标明出处的结论"
+        @click="!store.running && (store.analyzeOn = !store.analyzeOn)"
+      >
+        <svg class="cic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19V5M4 19h16M8 15l3-4 3 2 5-6" />
+        </svg>
+        深度分析
+      </div>
+      <span class="hint">{{
+        store.running ? "正在运行 · 流式接收中…"
+        : store.analyzeOn ? "会拆成几步查询，比普通提问慢一些 · Enter 发送"
+        : "重复的问题会命中缓存 · Enter 发送"
+      }}</span>
       <button class="send" :class="{ stop: store.running }" @click="send">
         <span v-if="store.running" class="stopsq"></span>
         {{ store.running ? "停止" : "发送" }}

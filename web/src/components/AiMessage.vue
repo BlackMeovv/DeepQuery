@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { prettySql, tokenizeSql } from "../lib/sql";
 import { cleanAnswer } from "../lib/text";
 import { nextStepOf, pillOf, useAppStore, type AiMsg } from "../stores/app";
+import AnalysisView from "./AnalysisView.vue";
 import DqLogo from "./DqLogo.vue";
 import ResultTable from "./ResultTable.vue";
 
@@ -67,118 +68,121 @@ function copyAnswer() {
 
 <template>
   <div class="ai">
-    <div class="striprow">
-      <div v-if="msg.status === 'running'" class="strip running" @click="open = !open">
-        <svg class="ring" width="17" height="17" viewBox="0 0 20 20" fill="none">
-          <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
-          <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
-        </svg>
-        <span class="rtitle">{{ runLabel }}</span>
-        <span v-if="runStep" class="rmeta">{{ runStep }}</span>
-        <span class="dots">
-          <span class="d"></span><span class="d d2"></span><span class="d d3"></span>
-        </span>
-      </div>
-      <div
-        v-else
-        class="strip"
-        :class="{ err: msg.status === 'blocked' || msg.status === 'failed', warn: msg.status === 'stopped', ask: msg.status === 'clarify' }"
-        @click="open = !open"
-      >
-        <span class="dot" :style="{ background: pill.bg, color: pill.c }">{{ pill.i }}</span>
-        <span :style="{ color: pill.c }" class="stitle">{{ pill.t }}</span>
-        <span class="smeta">{{ meta }}</span>
-        <span class="schev" :class="{ open }">›</span>
-      </div>
-      <span v-if="msg.status === 'cached'" class="cachetag">缓存命中 · 零消耗</span>
-    </div>
-
-    <div v-if="open" class="stepsbox">
-      <div v-if="msg.status === 'cached'" class="scache">
-        命中结果缓存，直接返回历史结果，本次无运行步骤、零消耗。
-      </div>
-      <div v-for="(s, i) in msg.steps" :key="i" class="step">
-        <svg v-if="s.state === 'run'" class="stepring" width="16" height="16" viewBox="0 0 20 20" fill="none">
-          <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
-          <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
-        </svg>
-        <span
+    <AnalysisView v-if="msg.mode === 'analyze'" :msg="msg" />
+    <template v-else>
+      <div class="striprow">
+        <div v-if="msg.status === 'running'" class="strip running" @click="open = !open">
+          <svg class="ring" width="17" height="17" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
+            <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
+          </svg>
+          <span class="rtitle">{{ runLabel }}</span>
+          <span v-if="runStep" class="rmeta">{{ runStep }}</span>
+          <span class="dots">
+            <span class="d"></span><span class="d d2"></span><span class="d d3"></span>
+          </span>
+        </div>
+        <div
           v-else
-          class="sdot"
-          :style="{
-            background: s.state === 'error' ? 'var(--errbg)' : 'var(--acc2bg)',
-            color: s.state === 'error' ? 'var(--err)' : 'var(--acc2ink)',
-          }"
-        >{{ s.state === "error" ? "✕" : "✓" }}</span>
-        <div class="sbody">
-          <div class="slabel">{{ s.label }}</div>
-          <div v-if="s.thought" class="sthought">{{ s.thought }}</div>
-          <div v-if="s.detail" class="sdetail">{{ s.detail }}</div>
-          <pre v-if="s.sql" class="ssql mono"><span v-for="(t, j) in tokenizeSql(prettySql(s.sql))" :key="j" :style="{ color: t.c }">{{ t.t }}</span></pre>
-          <div v-if="s.err" class="serr mono">{{ s.err }}</div>
+          class="strip"
+          :class="{ err: msg.status === 'blocked' || msg.status === 'failed', warn: msg.status === 'stopped', ask: msg.status === 'clarify' }"
+          @click="open = !open"
+        >
+          <span class="dot" :style="{ background: pill.bg, color: pill.c }">{{ pill.i }}</span>
+          <span :style="{ color: pill.c }" class="stitle">{{ pill.t }}</span>
+          <span class="smeta">{{ meta }}</span>
+          <span class="schev" :class="{ open }">›</span>
+        </div>
+        <span v-if="msg.status === 'cached'" class="cachetag">缓存命中 · 零消耗</span>
+      </div>
+
+      <div v-if="open" class="stepsbox">
+        <div v-if="msg.status === 'cached'" class="scache">
+          命中结果缓存，直接返回历史结果，本次无运行步骤、零消耗。
+        </div>
+        <div v-for="(s, i) in msg.steps" :key="i" class="step">
+          <svg v-if="s.state === 'run'" class="stepring" width="16" height="16" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
+            <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
+          </svg>
+          <span
+            v-else
+            class="sdot"
+            :style="{
+              background: s.state === 'error' ? 'var(--errbg)' : 'var(--acc2bg)',
+              color: s.state === 'error' ? 'var(--err)' : 'var(--acc2ink)',
+            }"
+          >{{ s.state === "error" ? "✕" : "✓" }}</span>
+          <div class="sbody">
+            <div class="slabel">{{ s.label }}</div>
+            <div v-if="s.thought" class="sthought">{{ s.thought }}</div>
+            <div v-if="s.detail" class="sdetail">{{ s.detail }}</div>
+            <pre v-if="s.sql" class="ssql mono"><span v-for="(t, j) in tokenizeSql(prettySql(s.sql))" :key="j" :style="{ color: t.c }">{{ t.t }}</span></pre>
+            <div v-if="s.err" class="serr mono">{{ s.err }}</div>
+          </div>
+        </div>
+        <div v-if="msg.status === 'running'" class="step">
+          <svg class="stepring" width="16" height="16" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
+            <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
+          </svg>
+          <div class="sbody"><div class="slabel" style="color: var(--ink3)">{{ nextStep }}…</div></div>
         </div>
       </div>
-      <div v-if="msg.status === 'running'" class="step">
-        <svg class="stepring" width="16" height="16" viewBox="0 0 20 20" fill="none">
-          <circle cx="10" cy="10" r="7.5" stroke="var(--accbg)" stroke-width="3" />
-          <path d="M10 2.5 A7.5 7.5 0 0 1 17.5 10" stroke="var(--accink)" stroke-width="3" stroke-linecap="round" />
-        </svg>
-        <div class="sbody"><div class="slabel" style="color: var(--ink3)">{{ nextStep }}…</div></div>
+
+      <!-- 生成中的占位：logo 均衡器跳动 + 微光骨架 -->
+      <div v-if="msg.status === 'running' && !msg.answer" class="thinking">
+        <DqLogo :size="38" :animated="true" />
+        <div class="skel">
+          <div class="shimmer" style="width: 82%"></div>
+          <div class="shimmer" style="width: 58%; animation-delay: 0.15s"></div>
+        </div>
       </div>
-    </div>
 
-    <!-- 生成中的占位：logo 均衡器跳动 + 微光骨架 -->
-    <div v-if="msg.status === 'running' && !msg.answer" class="thinking">
-      <DqLogo :size="38" :animated="true" />
-      <div class="skel">
-        <div class="shimmer" style="width: 82%"></div>
-        <div class="shimmer" style="width: 58%; animation-delay: 0.15s"></div>
+      <div v-if="msg.status === 'blocked'" class="blocked">
+        <div class="btitle">回答已被幻觉校验拦截</div>
+        <div class="btext">{{ msg.blockedText }}</div>
       </div>
-    </div>
 
-    <div v-if="msg.status === 'blocked'" class="blocked">
-      <div class="btitle">回答已被幻觉校验拦截</div>
-      <div class="btext">{{ msg.blockedText }}</div>
-    </div>
+      <div v-if="msg.status === 'clarify' && msg.clarification" class="clarify">
+        <div class="answer">{{ msg.clarification.question }}</div>
+        <div v-if="clarifyState" class="cstate">{{ clarifyState }}</div>
+      </div>
 
-    <div v-if="msg.status === 'clarify' && msg.clarification" class="clarify">
-      <div class="answer">{{ msg.clarification.question }}</div>
-      <div v-if="clarifyState" class="cstate">{{ clarifyState }}</div>
-    </div>
+      <div v-if="answerText && msg.status !== 'blocked'" class="answer">{{ answerText }}</div>
 
-    <div v-if="answerText && msg.status !== 'blocked'" class="answer">{{ answerText }}</div>
-
-    <div v-if="showSource" class="source">
-      <span class="srctag">出处</span>
-      <span>查询结果 {{ msg.rowCount }} 行</span>
-      <template v-if="msg.sourceTables?.length">
+      <div v-if="showSource" class="source">
+        <span class="srctag">出处</span>
+        <span>查询结果 {{ msg.rowCount }} 行</span>
+        <template v-if="msg.sourceTables?.length">
+          <span class="dotsep">·</span>
+          <span>来自 <span class="mono">{{ msg.sourceTables.join("、") }}</span></span>
+        </template>
+        <template v-if="msg.numbersVerified">
+          <span class="dotsep">·</span>
+          <span class="verified" title="回答里的每个数字都能在查询结果、问题或 SQL 中找到">✓ {{ msg.numbersVerified }} 个数字已核对</span>
+        </template>
+        <span class="srclink" @click="store.panelId = msg.id">查看 SQL ›</span>
+      </div>
+      <div v-else-if="showMetaSource" class="source">
+        <span class="srctag">依据</span>
+        <span>表结构与业务口径</span>
         <span class="dotsep">·</span>
-        <span>来自 <span class="mono">{{ msg.sourceTables.join("、") }}</span></span>
-      </template>
-      <template v-if="msg.numbersVerified">
-        <span class="dotsep">·</span>
-        <span class="verified" title="回答里的每个数字都能在查询结果、问题或 SQL 中找到">✓ {{ msg.numbersVerified }} 个数字已核对</span>
-      </template>
-      <span class="srclink" @click="store.panelId = msg.id">查看 SQL ›</span>
-    </div>
-    <div v-else-if="showMetaSource" class="source">
-      <span class="srctag">依据</span>
-      <span>表结构与业务口径</span>
-      <span class="dotsep">·</span>
-      <span>未查询数据</span>
-    </div>
-    <div v-if="showSource && msg.sqlSummary?.length" class="source scope" title="从 SQL 自动生成，不经过模型">
-      <span class="srctag scopetag">口径</span>
-      <template v-for="(part, i) in msg.sqlSummary" :key="i">
-        <span v-if="i" class="dotsep">·</span>
-        <span>{{ part }}</span>
-      </template>
-    </div>
+        <span>未查询数据</span>
+      </div>
+      <div v-if="showSource && msg.sqlSummary?.length" class="source scope" title="从 SQL 自动生成，不经过模型">
+        <span class="srctag scopetag">口径</span>
+        <template v-for="(part, i) in msg.sqlSummary" :key="i">
+          <span v-if="i" class="dotsep">·</span>
+          <span>{{ part }}</span>
+        </template>
+      </div>
 
-    <ResultTable v-if="msg.columns && msg.columns.length" :columns="msg.columns" :rows="msg.rows || []" :row-count="msg.rowCount || 0" />
+      <ResultTable v-if="msg.columns && msg.columns.length" :columns="msg.columns" :rows="msg.rows || []" :row-count="msg.rowCount || 0" />
 
-    <img v-if="msg.chartUrl" class="chart" :src="msg.chartUrl" alt="chart" />
-    <div v-else-if="msg.chartError" class="charterr">图表生成失败：{{ msg.chartError }}</div>
+      <img v-if="msg.chartUrl" class="chart" :src="msg.chartUrl" alt="chart" />
+      <div v-else-if="msg.chartError" class="charterr">图表生成失败：{{ msg.chartError }}</div>
+    </template>
 
     <div v-if="msg.status !== 'running' && msg.status !== 'clarify'" class="foot">
       <span v-if="msg.answer" @click="copyAnswer">复制回答</span>

@@ -64,6 +64,10 @@ class TestCitationCheck:
         assert check_cited("上海 240 位 [2]。", self.STEPS) == ["「240」不在所标注的 [2] 的结果里"]
         assert check_cited("两者合计 240 位 [1][2]。", self.STEPS) == []
 
+    def test_thousands_separators(self):
+        steps = {1: (res(1255695.13, 837895.43), "")}
+        assert check_cited("最高 1,255,695.13，其次 837,895.43 [1]。", steps) == []
+
     def test_uncited_and_missing_steps(self):
         assert check_cited("全部客户 240 位。", self.STEPS) == ["「240」没有标注出自哪一步"]
         assert check_cited("有 99 位 [3]。", self.STEPS) == ["引用的第 3 步没有可用的查询结果"]

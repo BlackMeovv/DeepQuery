@@ -98,3 +98,13 @@ class TestOutcome:
         assert "LIMIT 200" in outcome.final_sql.upper()
         assert outcome.sql_summary[-1] == "按 客户数 从高到低"  # 不会出现"取前 200 条"
         assert any(part.startswith("按 ") and part.endswith("分组") for part in outcome.sql_summary)
+
+
+class TestExpressions:
+    def test_round_coalesce_abs_diff(self):
+        sql = (
+            "SELECT category, ROUND(SUM(price), 2) AS s FROM order_items GROUP BY category "
+            "ORDER BY ABS(COALESCE(MAX(price), 0) - COALESCE(MIN(price), 0)) DESC LIMIT 3"
+        )
+        assert describe(sql)[1] == "按 商品成交价的最大值与商品成交价的最小值的差距 从高到低"
+        assert scope.describe("SELECT a FROM t ORDER BY ROUND(b * 2, 1)")[-1] == "按 b乘2 从低到高"
