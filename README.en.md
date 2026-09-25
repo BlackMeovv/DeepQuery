@@ -102,6 +102,29 @@ Web UI, CLI and an MCP server share one agent; SQLite / MySQL / PostgreSQL via r
 
 </td>
 </tr>
+<tr>
+<td width="33%" valign="top">
+
+**🔍 Deep analysis**
+
+"Why did March sales go up?" is split into several queries that run in parallel, with an optional drill-down after seeing the results; every sentence of the conclusion cites its step, and each number is checked against the step it cites
+
+</td>
+<td width="33%" valign="top">
+
+**🔄 Feedback loop**
+
+Every answer can be rated 👍/👎; the run log doubles as an audit log, and downvoted runs export with their question, context and SQL as eval cases waiting for a gold answer
+
+</td>
+<td width="33%" valign="top">
+
+**🗳️ Candidate voting**
+
+Optional: sample a second SQL and accept when both return the same result; on disagreement sample more and take the majority result, so extra cost is only spent on hard questions
+
+</td>
+</tr>
 </table>
 
 ## Results

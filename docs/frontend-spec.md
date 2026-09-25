@@ -83,7 +83,8 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
   // 同一会话里之前的几轮（旧的在前，最多 3 轮），让 Agent 听懂"那按州呢""这些用了哪些字段"这类追问。
   // 只拼进提示词供模型参考、从不执行；缓存按它区分。question ≤500 字、sql ≤4000 字、answer ≤600 字。
   // sql 建议传上一轮 final 里的 predicted_sql（模型原始 SQL）：守卫改写版末尾的 LIMIT 会被模型照抄
-  "history": [ { "question": "延迟送达的订单评分低多少？", "sql": "SELECT …", "answer": "低 2.02 分。" } ]
+  "history": [ { "question": "延迟送达的订单评分低多少？", "sql": "SELECT …", "answer": "低 2.02 分。" } ],
+  "mode": "ask"         // analyze = 深度分析：拆成几步查询，再写每句标注出处的结论（事件和结果见下文"分析模式"）
 }
 ```
 用 POST 而不是 GET：带上之前几轮的 SQL 后，URL 会超过 nginx 默认 8KB 的请求行上限；口令也不会进访问日志。
@@ -94,11 +95,12 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 **`event: node`**（每完成一个节点推一条，驱动右栏运行过程）：
 ```json
 {
-  "node": "browse_schema | generate_sql | execute | repair | chart | summarize | fallback | clarify | explain",
+  "node": "browse_schema | generate_sql | execute | repair | chart | summarize | fallback | clarify | explain | reply",
   "label": "生成 SQL",
   "thought": "模型的一句话思路（generate_sql/repair 才有，可无）",
   "sql": "生成的 SQL（generate_sql/repair 才有）",
-  // 补充说明（browse_schema/repair 可能有）：如"展开 orders 的完整定义；查看 orders.status 的真实取值"
+  // 补充说明（browse_schema / repair / 开启投票时的 generate_sql 可能有）：
+  // 如"展开 orders 的完整定义；查看 orders.status 的真实取值""生成 2 条候选 SQL，2 条执行结果一致"
   "detail": "…",
   "ok": false,               // 仅 execute/chart 携带
   "error_kind": "no_such_column",   // 失败时携带：结构化错误分类
@@ -113,7 +115,8 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 {
   // ok_meta：问的是口径 / 表结构 / 之前的查询怎么算的，Agent 依据 schema 与业务字典直接回答，
   // 没有查询数据（sql 为 null、没有结果表），前端出处应写"依据表结构与业务口径 · 未查询数据"
-  "status": "ok | ok_empty | ok_meta | failed | budget_exceeded | needs_clarification",
+  // ok_chat：打招呼、问"你是谁"这类闲聊，直接回应（不显示出处）
+  "status": "ok | ok_empty | ok_meta | ok_chat | failed | budget_exceeded | needs_clarification",
   "cached": false,                  // true=缓存命中（此时没有 node 事件，直接 final）
   "answer": "自然语言回答",
   "sql": "实际执行的 SQL（含守卫注入的 LIMIT）",
@@ -128,6 +131,8 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
   "hallucination_blocked": false,   // true=回答被防幻觉拦截降级（UI 应给警示态）
   "source_tables": ["orders", "reviews"],  // 出处：结果来自哪几张表
   "numbers_verified": 1,            // 回答里核对过出处的数字个数
+  "sql_summary": ["筛选：订单状态 不是 已取消", "按 品类 分组", "按 销售额 从高到低", "取前 5 条"],  // 口径说明，不经过模型
+  "run_id": "3f2a…",                // 这次运行的编号，打分时带回（服务端关闭运行记录时为 null）
   "chart_url": "/charts/chart-ab12….png",  // 或 null；chart_error 为失败原因
   "chart_error": null,
   // status=needs_clarification 时：Agent 没有写 SQL，而是要向用户确认（其余时候为 null）
@@ -141,9 +146,30 @@ echo "CORS_ALLOW_ORIGINS=http://localhost:5173" >> .env
 错误处理：读流出错或没收到 final 就断开 = 连接中断；停止查询 = `AbortController.abort()`，服务端随即停止调用模型。
 口令错误返回 401；参数校验失败返回 422（question 为空/超 2000 字，history 超 3 轮或超长，note 超 500 字）。
 
-### 5. `GET /charts/{name}` — 沙箱图表 PNG（final 里的 chart_url 直接当 `<img src>`）
+**分析模式（`mode: "analyze"`）**：没有 `delta` 以外的逐字过程，node 事件换成下面几种：
+```json
+{ "node": "plan", "label": "制定分析计划", "thought": "先看总体再按品类拆",
+  "steps": [ { "no": 1, "question": "2018 年 2 月和 3 月的销售额各是多少", "purpose": "先确认涨跌" } ] }
+{ "node": "run_step", "label": "第 1 步",           // 每完成一步推一条（各步并行，完成顺序不固定）
+  "step": { "no": 1, "question": "…", "status": "ok", "ok": true, "sql": "…", "predicted_sql": "…",
+            "summary": ["…"], "columns": ["月份", "销售额"], "rows": [["2018-02", 837895.43]], "row_count": 2, "error": null } }
+{ "node": "review", "label": "检查是否需要下钻", "thought": "手表礼品涨得最多，再看地区",
+  "added": [ { "no": 3, "question": "…", "purpose": "下钻" } ] }   // 不下钻时 added 为空
+{ "node": "report", "label": "写结论" }
+```
+final 在普通结果的字段之外多出 `"mode": "analyze"`、`"steps"`（同 run_step 里的 step，按步骤号排好）、
+`"plan_thought"`、`"review_note"`；`answer` 是结论，句末的 `[n]` 表示出自第 n 步，前端可渲染成可点的标记；
+`numbers_verified` 是逐句核对过出处的数字个数；结论数字对不上所标注步骤时 `hallucination_blocked=true`，
+`answer` 改为各步结果的列表。`sql`、`columns`、`rows` 为空。
 
-### 6. `GET /metrics` — Prometheus 文本（前端一般不用）
+### 5. `POST /api/feedback` — 给一次运行打分
+
+请求体：`{"run_id": "…", "rating": "up" | "down", "reason": "数字不对", "user": "…", "code": "…"}`（reason 可空，≤200 字）。
+只能给自己（同一个 user）的运行打分，重复提交会覆盖；run_id 不存在或不是自己的返回 404，口令错误 401，太频繁 429。
+
+### 6. `GET /charts/{name}` — 沙箱图表 PNG（final 里的 chart_url 直接当 `<img src>`）
+
+### 7. `GET /metrics` — Prometheus 文本（前端一般不用）
 
 ## 五、交互要点（照抄内置页的行为即可）
 
