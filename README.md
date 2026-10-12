@@ -1,5 +1,4 @@
 <div align="center">
-
 <img src="docs/assets/logo.svg" width="88" alt="DeepQuery logo">
 
 # DeepQuery
