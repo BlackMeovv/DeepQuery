@@ -142,6 +142,7 @@ class SchemaRetriever:
 class TextEntry:
     key: str  # 展示用（术语名 / 例句问题）
     body: str  # 检索与注入用全文
+    sql: str = ""  # 例句的 SQL（建档时据此登记依赖、复核时试编译）
 
 
 class TextIndex:
@@ -151,12 +152,15 @@ class TextIndex:
         self.entries = entries
         self._bm25 = BM25([tokenize(f"{e.key} {e.body}") for e in entries]) if entries else None
 
-    def top(self, question: str, n: int) -> list[TextEntry]:
+    def top(self, question: str, n: int, exclude: set[str] | None = None) -> list[TextEntry]:
+        """exclude：不参与召回的条目 key（待复核的例句 / 口径），先排除再取前 n 条。"""
         if not self._bm25 or n <= 0:
             return []
         query_tokens = tokenize(question)
         scores = self._bm25.scores(query_tokens)
         ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
+        if exclude:
+            ranked = [i for i in ranked if self.entries[i].key not in exclude]
         return [self.entries[i] for i in ranked[:n] if scores[i] > 0]
 
 
@@ -192,6 +196,7 @@ def load_examples(path) -> TextIndex:
                     TextEntry(
                         key=item["question"],
                         body=f"问：{item['question']}\n```sql\n{item['sql']}\n```",
+                        sql=item["sql"],
                     )
                 )
     return TextIndex(entries)

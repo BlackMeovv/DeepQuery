@@ -66,9 +66,16 @@ SSE_HEARTBEAT_SECONDS = 10.0
 
 def memory_scope(agent: DeepQuery, user: str) -> str:
     """用户记忆内容的指纹：记忆会注入提示词、影响答案，所以结果缓存按它区分。"""
-    notes = sorted(note for _id, note, _ts in agent.memory.notes(user)) if agent.memory else []
+    rows = agent.memory.notes(user) if agent.memory else []
+    notes = sorted(note for _id, note, _ts in rows)
     if not notes:
         return "-"
+    # 建档时：这个用户哪些记忆待复核、暂停使用，也会改变答案（别的访客的记忆状态不影响这里）
+    cat = getattr(agent, "catalog", None)
+    if cat is not None:
+        held = cat.excluded("memory") & {str(i) for i, _n, _ts in rows}
+        if held:
+            notes.append("review:" + ",".join(sorted(held)))
     return hashlib.sha256("\n".join(notes).encode("utf-8")).hexdigest()[:16]
 
 
@@ -392,9 +399,15 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         code: str | None = Query(None, max_length=64),
     ):
         require_code(code)
+        cat = get_agent().catalog
+        flagged = (
+            {i.key: i.reason for i in cat.store.items(cat.key, "memory", user) if i.status == "review"}
+            if cat is not None else {}
+        )
         return {
             "notes": [
-                {"id": i, "note": note, "created_at": ts}
+                # review：引用的表 / 列 / 取值已经不在库里，暂不使用（为空表示正常）
+                {"id": i, "note": note, "created_at": ts, "review": flagged.get(str(i))}
                 for i, note, ts in get_memory().notes(user)
             ]
         }
@@ -421,6 +434,39 @@ def create_app(agent: DeepQuery | None = None, settings: Settings | None = None)
         if not get_memory().forget(user, note_id):
             raise HTTPException(status_code=404)
         return {"ok": True}
+
+    @app.get("/api/catalog")
+    def api_catalog(
+        user: str = Query("default", max_length=64),
+        code: str | None = Query(None, max_length=64),
+    ):
+        """建档状态：哪些表建好了档、说明来源、待复核的条目（用户记忆只返回本人的）、最近的变化。"""
+        require_code(code)
+        agent_ = get_agent()
+        cat = agent_.catalog
+        if cat is None:
+            return {"enabled": False}
+        agent_.maybe_refresh_schema()
+        view = cat.view()
+        visible = agent_.allowed_tables
+        return {
+            "enabled": True,
+            "status": cat.status(),
+            "tables": [
+                {"name": t, "note": view.table_note(t), "profiled": card.profile is not None}
+                for t, card in view.tables.items() if t in visible
+            ],
+            "review": [
+                {"id": i.id, "kind": i.kind, "text": i.text, "reason": i.reason}
+                for i in cat.review_items() if i.kind != "memory" or i.user_id == user
+            ],
+            # 用户记忆相关的事件不给出去：那是各个访客私人的
+            "events": [
+                {"at": at, "kind": kind, "detail": detail}
+                for at, kind, detail in cat.store.events(cat.key, 50)
+                if not detail.startswith("用户记忆")
+            ][:20],
+        }
 
     @app.get("/charts/{name}")
     def chart_file(name: str):

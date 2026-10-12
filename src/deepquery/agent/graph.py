@@ -28,7 +28,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TypedDict
 
 from langgraph.errors import GraphRecursionError
@@ -293,6 +293,11 @@ class _SchemaSnapshot:
     columns: dict  # 表 → 列名清单（渐进式披露的目录、查列取值时核对列名）
     catalog: dict  # 表 → 一行目录（表名 + 说明 + 列名）
     labels: dict  # (表, 列) → 建表注释里的中文名与枚举值中文（口径说明用）
+    catalog_version: int = 0  # 拼进表定义的档案版本（档案在后台更新后，下次提问换上新快照）
+    structure_version: int = 0  # 建档同步发现结构变化的次数（变了就整份重读建表语句）
+    raw_docs: dict = field(default_factory=dict)  # 没附档案的表定义：档案更新时直接重新附，不用再自省业务库
+    raw_columns: dict = field(default_factory=dict)  # 表 → [(列, 类型)]：判断档案是不是按当前结构建的
+    raw_chars: int = 0  # 没附档案时的 schema 体积：直供 / 披露的分界按它算，开不开建档不改变这个选择
 
 
 def resolve_allowed_tables(settings: Settings, db) -> set[str]:
@@ -317,8 +322,10 @@ class DeepQuery:
         llm: BaseLLM,
         tracer: Tracer | None = None,
         memory=None,  # MemoryStore | None：跨会话用户口径记忆
+        catalog=None,  # catalog.Catalog | None：数据库建档与记忆同步
     ):
         self.memory = memory
+        self.catalog = catalog
         self.settings = settings
         self.db = db
         self.llm = llm
@@ -329,6 +336,14 @@ class DeepQuery:
         glossary_path, examples_path = knowledge_paths(settings)  # 内置数据集自带各自的口径
         self._glossary = load_glossary(glossary_path)
         self._examples = load_examples(examples_path)
+        if catalog is not None:
+            # 例句、口径、用户记忆登记进依赖索引：表结构变了能找到受影响的条目去复核
+            catalog.attach(
+                memory=memory,
+                allowed=lambda: resolve_allowed_tables(self.settings, self.db),
+                glossary=self._glossary,
+                examples=self._examples,
+            )
         self._sandbox = None  # 图表沙箱按需构建
         self._analyst = None  # 分析模式按需构建
         self._graph = self._build_graph()
@@ -355,7 +370,14 @@ class DeepQuery:
     @property
     def schema_fingerprint(self) -> str:
         """当前已加载 schema 的版本指纹（服务端把它编入缓存 key）。"""
-        return self._snap.fingerprint
+        return self._token(self._snap)
+
+    def _token(self, snap: _SchemaSnapshot) -> str:
+        """缓存 key 用的版本号：表结构指纹 +（启用建档时）档案版本 + 待复核的口径 / 例句。
+        用户记忆的复核状态因人而异，由服务端按用户拼进缓存 key（memory_scope）。"""
+        if self.catalog is None:
+            return snap.fingerprint
+        return f"{snap.fingerprint}#{snap.catalog_version}.{self.catalog.shared_flag_token()}"
 
     def _load_schema(self) -> _SchemaSnapshot:
         """自省数据库，构建一份完整的 schema 快照（不修改实例状态）。
@@ -370,15 +392,39 @@ class DeepQuery:
         list_columns = getattr(self.db, "table_columns", None)
         raw = list_columns() if callable(list_columns) else {}
         columns = {t: [c["name"] for c in raw.get(t, [])] for t in docs}
-        return _SchemaSnapshot(
+        snap = _SchemaSnapshot(
             fingerprint=fingerprint,
             allowed_tables=allowed,
             table_docs=docs,
             full_schema="\n\n".join(docs.values()),
+            # 检索建在没附档案的表定义上：档案更新时不用重新向量化（配置了 EMBED_* 时）
             retriever=SchemaRetriever(docs, embedder=build_embedder(self.settings)),
             columns=columns,
             catalog=disclosure.build_catalog(docs, columns),
-            labels=scope.column_labels(docs),
+            labels=scope.column_labels(docs),  # 口径说明里的中文名只认建表注释
+            raw_docs=docs,
+            raw_columns={t: [(c["name"], c.get("type") or "") for c in raw.get(t, [])] for t in docs},
+            raw_chars=sum(len(d) for d in docs.values()),
+            structure_version=self.catalog.structure_version if self.catalog is not None else 0,
+        )
+        return self._decorate(snap)
+
+    def _decorate(self, snap: _SchemaSnapshot) -> _SchemaSnapshot:
+        """把档案附到表定义上（建了档、且档案和当前结构一致的表）。只读档案库，不碰业务库。
+        档案库读不了时原样返回——退回只用建表语句。"""
+        if self.catalog is None:
+            return snap
+        view = self.catalog.safe_view()
+        if view is None:
+            return snap
+        docs = view.annotate(snap.raw_docs, snap.raw_columns)
+        notes = {t: view.table_note(t) for t in docs}
+        return replace(
+            snap,
+            table_docs=docs,
+            full_schema="\n\n".join(docs.values()),
+            catalog=disclosure.build_catalog(docs, snap.columns, notes),
+            catalog_version=view.version,
         )
 
     def maybe_refresh_schema(self) -> str:
@@ -386,20 +432,37 @@ class DeepQuery:
 
         检查是一次微秒/毫秒级查询；建表/改表后无需重启服务即可被看见。
         不支持指纹的引擎返回空串，保持「启动时加载一次」的旧行为。
+
+        启用建档时：结构变了先用新的建表语句顶上，同时交给后台只重建变了的表、复核受影响的记忆；
+        后台建完（档案版本变了）下次提问换上带档案的新快照。提问本身从不等建档。
         """
+        cat = self.catalog
+        if cat is not None:
+            cat.tick()  # 别的进程改过档案、取值到期刷新、定期结构检查；平时只是一次时间比较，从不抛异常
+            if cat.structure_version != self._snap.structure_version:
+                # 建档同步发现了结构变化（含 MySQL/PG 提问指纹看不到的主外键、注释变化）：整份重读
+                with self._refresh_lock:
+                    if cat.structure_version != self._snap.structure_version:
+                        self._snap = self._load_schema()
+            if cat.cards_version != self._snap.catalog_version:
+                with self._refresh_lock:
+                    if cat.cards_version != self._snap.catalog_version:
+                        self._snap = self._decorate(self._snap)  # 只重新附档案，不再自省业务库
         fp = getattr(self.db, "schema_fingerprint", None)
         if not callable(fp):
-            return self._snap.fingerprint
+            return self._token(self._snap)
         # SQLite 查指纹是微秒级，每次都查；MySQL/PG 要扫 information_schema，按引擎给的间隔节流
         ttl = getattr(self.db, "fingerprint_ttl", 0)
         if ttl and time.monotonic() - self._fp_checked_at < ttl:
-            return self._snap.fingerprint
+            return self._token(self._snap)
         with self._refresh_lock:  # 表结构变化时，并发请求只重建一次
             current = fp()
             self._fp_checked_at = time.monotonic()
             if current != self._snap.fingerprint:
                 self._snap = self._load_schema()  # 单次引用赋值：读者要么见旧快照，要么见新快照
-        return self._snap.fingerprint
+                if cat is not None:
+                    cat.sync_in_background()
+        return self._token(self._snap)
 
     def _schema_mode(self, snap: _SchemaSnapshot) -> str:
         """决定这次怎么把表结构交给模型：full / retrieve / disclose。
@@ -413,7 +476,7 @@ class DeepQuery:
             return "retrieve"
         if mode == "disclose":
             return "disclose"
-        full_chars = sum(len(d) for d in snap.table_docs.values())
+        full_chars = snap.raw_chars or sum(len(d) for d in snap.table_docs.values())
         too_big = (
             len(snap.table_docs) > self.settings.schema_rag_top_k
             and full_chars > self.settings.schema_rag_auto_max_chars
@@ -440,15 +503,21 @@ class DeepQuery:
 
         knowledge = ""
         top_n = self.settings.knowledge_top_n
-        glossary_hits = self._glossary.top(question, top_n)
+        cat = self.catalog
+        # 待复核的条目（引用的表 / 列 / 取值已经不在库里）不召回，免得旧口径把模型带偏
+        glossary_hits = self._glossary.top(question, top_n, exclude=cat.excluded("glossary") if cat else None)
         if glossary_hits:
             knowledge += "\n\n业务字典（口径定义）：\n" + "\n".join(e.body for e in glossary_hits)
-        example_hits = self._examples.top(question, top_n)
+        example_hits = self._examples.top(question, top_n, exclude=cat.excluded("example") if cat else None)
         if example_hits:
             knowledge += "\n\n相似问题参考：\n" + "\n\n".join(e.body for e in example_hits)
         memory_hits: list[str] = []
         if self.memory is not None:
-            memory_hits = self.memory.recall(user_id, question, top_n)
+            exclude_ids = None
+            if cat is not None:
+                cat.register_memories(user_id, self.memory.notes(user_id))  # 新存的记忆登记依赖
+                exclude_ids = {int(k) for k in cat.excluded("memory") if k.isdigit()}
+            memory_hits = self.memory.recall(user_id, question, top_n, exclude_ids=exclude_ids)
             if memory_hits:
                 knowledge += "\n\n该用户的口径偏好（跨会话记忆，优先遵循）：\n" + "\n".join(
                     f"- {m}" for m in memory_hits
@@ -766,7 +835,8 @@ class DeepQuery:
                 continue
             done.add(key)
             keys.append(key)
-            note = disclosure.probe_values(self.db, table, column)
+            observe = self.catalog.observe_values if self.catalog is not None else None
+            note = disclosure.probe_values(self.db, table, column, on_values=observe)
             if note:
                 notes.append(note)
         if keys:

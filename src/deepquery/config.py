@@ -99,6 +99,16 @@ class Settings(BaseSettings):
     # 压测/演示用 mock 模式：不调真实 LLM（回答固定套路 SQL），绝不能用于评测
     llm_mock: bool = False
 
+    # 数据库建档与记忆同步：接入时给每张表建档（枚举取值、日期范围、格式样例、关联关系 + 中文说明），
+    # 档案存在下面这个 DeepQuery 自己的库里，业务库全程只读、不会多出任何表或注释。
+    # 表结构变化按表级指纹增量同步；依赖失效表 / 列 / 取值的例句、口径、用户记忆标"待复核"、暂不召回
+    catalog_enabled: bool = True
+    catalog_db_path: str = "data/catalog.sqlite"
+    catalog_sample_rows: int = 20000  # 每张表统计前多少行（日期起止除外，那是全表的 MIN/MAX）
+    catalog_enum_max: int = 30  # 不同值不超过这么多的文本列，列出全部取值
+    catalog_refresh_hours: float = 24.0  # 取值档案多久重新采集一次（数据增删不改结构指纹）；0 = 不定期刷新
+    catalog_describe: bool = True  # 用模型给没有注释的表 / 列写中文说明（标"待确认"，人工改过的不覆盖）
+
     # 跨会话记忆
     memory_db_path: str = "data/memory.sqlite"
     # 运行记录与用户反馈（审计 + 差评导出成评测用例）；留空则不记录

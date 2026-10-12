@@ -69,12 +69,22 @@ class MemoryStore:
                 (user_id,),
             ).fetchall()
 
-    def recall(self, user_id: str, question: str, top_n: int = 3) -> list[str]:
+    def all_notes(self) -> list[tuple[int, str, str]]:
+        """全部用户的记忆 [(id, user_id, note)]（建档时登记依赖用）。"""
+        with self._connect() as conn:
+            return conn.execute("SELECT id, user_id, note FROM notes ORDER BY id").fetchall()
+
+    def recall(
+        self, user_id: str, question: str, top_n: int = 3, exclude_ids: set[int] | None = None
+    ) -> list[str]:
         """检索与问题相关的记忆；条目很少时（<= top_n）全部返回。
 
         内容完全相同的重复条目只注入一次——重复不增加信息，还会挤占 top_n 名额。
+        exclude_ids：待复核的记忆（引用的表 / 列 / 取值已经不在库里），先排除再检索。
         """
         rows = self.notes(user_id)
+        if exclude_ids:
+            rows = [r for r in rows if r[0] not in exclude_ids]
         if not rows:
             return []
         texts = list(dict.fromkeys(note for _id, note, _ts in rows))

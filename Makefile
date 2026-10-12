@@ -1,4 +1,4 @@
-.PHONY: install demo-db olist-db olist-set olist-gold olist-eval behavior-gold behavior-eval analysis-eval test smoke smoke-gold ask schema bird-prepare spider-prepare bird report
+.PHONY: install demo-db olist-db olist-set olist-gold olist-eval behavior-gold behavior-eval analysis-eval test smoke smoke-gold ask schema catalog bird-prepare spider-prepare bird report
 
 install:            ## 安装依赖（含 dev）
 	uv sync --extra dev
@@ -26,6 +26,10 @@ ask:                ## 提问：make ask Q="上海的客户一共有多少个？
 
 schema:             ## 查看喂给模型的 schema 上下文
 	uv run deepquery schema
+
+catalog:            ## 建档 / 同步：只重建结构变了的表，复核受影响的例句、口径和记忆
+	uv run deepquery catalog build
+	uv run deepquery catalog status
 
 bird-prepare:       ## 转换 BIRD dev 子集：make bird-prepare ROOT=~/data/bird_dev
 	uv run python -m deepquery.evalkit.prepare bird $(ROOT) --out eval/cases/bird-dev.jsonl --limit 150

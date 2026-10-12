@@ -53,7 +53,10 @@ def run_eval(
     db_root: str | Path | None = None,
     sleep_seconds: float = 0.0,
     db_path: str | Path | None = None,
+    catalog: bool = False,
 ) -> dict:
+    """catalog=True：每个库先建档（阻塞），表定义附上档案后再答题——建档有无的消融用。
+    默认关闭，保证与历史评测的提示词完全一致、数字可比。"""
     settings = get_settings()
     if db_path:  # 覆盖 DB_PATH：业务口径文件随之切换到该数据集自己的那一份
         settings = settings.model_copy(update={"db_path": str(db_path)})
@@ -117,7 +120,22 @@ def run_eval(
             else:
                 key = str(db_path)
                 if key not in agents:
-                    agents[key] = DeepQuery(settings, db, real_llm)
+                    cat = None
+                    if catalog:
+                        from ..catalog import Catalog
+
+                        # 评测要可复现：不定期刷新、不在答题过程中改档案、不起后台任务——
+                        # 每道题看到的档案都是开跑前建好的那一份
+                        cat = Catalog.from_settings(
+                            settings.model_copy(update={"catalog_refresh_hours": 0}),
+                            db,
+                            llm=real_llm,
+                            observe=False,
+                            auto_background=False,
+                        )
+                    agents[key] = DeepQuery(settings, db, real_llm, catalog=cat)
+                    if cat is not None:
+                        cat.sync()
                 agent = agents[key]
 
             outcome = agent.ask(case["question"], generate_answer=False)
@@ -200,6 +218,7 @@ def run_eval(
     summary = {
         "label": label or f"{Path(cases_path).stem}-{mode}",
         "mode": mode,
+        "catalog": bool(catalog) and not gold_replay,  # 是否开启建档（消融对照用）
         "model": None if gold_replay else settings.llm_model,
         "cases": len(cases),
         "repeats": repeats,
@@ -284,6 +303,10 @@ def main() -> None:
     parser.add_argument(
         "--sleep", type=float, default=0.0, help="每题之间的间隔秒数（应对限流严格的中转站）"
     )
+    parser.add_argument(
+        "--catalog", action="store_true",
+        help="先给每个库建档（取值、日期范围、关联、中文说明），表定义附上档案再答题；建档有无的消融用",
+    )
     args = parser.parse_args()
     report = run_eval(
         args.cases,
@@ -295,6 +318,7 @@ def main() -> None:
         db_root=args.db_root,
         sleep_seconds=args.sleep,
         db_path=args.db,
+        catalog=args.catalog,
     )
     if args.gold_replay and report["summary"]["ex_accuracy"] < 1.0:
         raise SystemExit("gold-replay 未达 100%：评测基建存在 bug，请先修复")

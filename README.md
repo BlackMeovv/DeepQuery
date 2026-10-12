@@ -65,9 +65,9 @@
 </td>
 <td width="33%" valign="top">
 
-**🧭 上下文工程**
+**🗂️ 先认识数据库**
 
-schema 装得下就完整交给模型；装不下时渐进式披露：先给表目录（体积约为完整定义的 11–15%），模型选表后再展开定义、按需查列的真实取值；业务口径、相似例句和用户记忆按需注入
+接入时只读地为每张表建档：枚举取值、日期范围、格式样例、关联关系，缺注释的表和列由模型补中文说明（标"待确认"，人工改的优先）；装得下就把建表语句连同档案完整交给模型，装不下先给表目录（约为完整定义的 11–15%）再按需展开
 
 </td>
 <td width="33%" valign="top">
@@ -88,9 +88,9 @@ schema 装得下就完整交给模型；装不下时渐进式披露：先给表�
 </td>
 <td width="33%" valign="top">
 
-**🧠 追问与记忆**
+**🧠 记忆跟着库走**
 
-同一会话里可以接着追问（"那按州呢"），前几轮的问题和 SQL 会带进上下文；保存的口径和偏好注入之后的每次提问，定义过的说法不再反问，公网部署时每个访客的记忆相互隔离
+可以接着追问（"那按州呢"）；保存的口径注入之后的每次提问。表结构变了按表级指纹只重建变了的表，引用了失效表、列或取值的例句、口径和记忆自动标"待复核"、暂停使用，结构恢复或试编译通过后自动恢复
 
 </td>
 <td width="33%" valign="top">
@@ -157,7 +157,7 @@ schema 装得下就完整交给模型；装不下时渐进式披露：先给表�
 
 ```mermaid
 flowchart LR
-    Q([提问]) --> CTX["上下文组装<br/>schema 直供或渐进式披露<br/>+ 业务口径 / 例句 / 记忆"]
+    Q([提问]) --> CTX["上下文组装<br/>表结构 + 建档，直供或渐进式披露<br/>+ 业务口径 / 例句 / 记忆"]
     CTX --> GEN[生成 SQL]
     GEN -- 口径不明或缺数据 --> ASK(["向用户确认<br/>给出可选口径"])
     ASK -. 用户选择后重新提问 .-> Q
@@ -192,7 +192,7 @@ flowchart LR
 |---|---|
 | Agent 编排 | LangGraph 状态机 + 手写修复循环 |
 | SQL 安全 | sqlglot 语法树守卫；SQLite / MySQL / PostgreSQL 只读接入 |
-| 检索 | BM25（中文单字 + 双字分词）+ 可选向量检索，RRF 融合 |
+| 上下文 | 只读建档（枚举取值 / 日期范围 / 格式样例 / 关联关系 + 中文说明），表级指纹增量同步；装不下时渐进式披露；口径、例句、记忆按 BM25 召回 |
 | 服务 | FastAPI + SSE 流式；Redis 结果缓存；Prometheus / Grafana；Langfuse 追踪；MCP server |
 | 前端 | Vue 3 + Vite + Pinia，自研样式，无 UI 组件库依赖 |
 | 评测 | 自研 evalkit：执行准确率判分、聚类校正区间、按题配对比较、BIRD / Spider 适配 |
@@ -215,7 +215,7 @@ make serve                    # 网页 http://localhost:8000
 不配置模型 API 也能验证全部工程链路：
 
 ```bash
-make test         # 280+ 个离线测试（MockLLM）
+make test         # 500+ 个离线测试（MockLLM）
 make smoke-gold   # 评测基建自检：gold SQL 回放必须 100%
 ```
 
@@ -231,6 +231,17 @@ deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # uv syn
 
 生产接入请使用**只读数据库账号**，它是权限的硬边界，应用层守卫是它之上的第二道防线；`.env` 中的 `ALLOWED_TABLES` 可以进一步限制 Agent 可见的表。
 
+第一次接入时自动建档（也可以手动 `deepquery catalog build`），档案存在 DeepQuery 自己的 `data/catalog.sqlite`，业务库不会多出任何表或注释。之后每次提问只比一次表结构指纹，不扫业务表；建表、删列这类变化在后台只重建变了的表。
+
+```bash
+deepquery catalog status                       # 建档进度、说明来源、待复核条目、最近的变化
+deepquery catalog show orders                  # 看一张表的档案
+deepquery catalog describe orders.status "订单状态，paid 表示已支付"   # 人工说明，之后的建档不会覆盖
+deepquery catalog review                       # 表结构变化后待复核的例句、口径和记忆
+```
+
+设计与取舍见 [docs/catalog.md](docs/catalog.md)。
+
 ## 安全设计
 
 | 风险 | 措施 |
@@ -241,6 +252,7 @@ deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # uv syn
 | 回答编造数字 | 数字溯源校验，重写一次仍不合格则降级为原始结果；不读任何表的 SQL（SELECT 常量拼出来的"结果"）被守卫拦下；问口径、表结构时不查数据直接回答，出处标明"未查询数据"，其中出现的数字也必须在表结构或口径里找得到 |
 | 回答错了没人知道 | 每个回答可以点 👍/👎（差评可选原因）；运行记录同时是审计日志，`deepquery feedback-export` 把差评连同问题、上下文、SQL 导出成待标注的评测用例，补上标准答案就进回归集 |
 | 查询"成功"但答案是错的 | COUNT / SUM 得 0 不会报错，最容易被当成真实答案：结果全为 0 或空、且过滤值在库里根本不存在时，按空结果处理，查出该列真实出现过的取值交给修复轮 |
+| 旧口径把模型带偏 | 表结构或取值变化后，引用了失效表、列或取值的例句、口径、用户记忆标"待复核"、不再注入提示词；例句按当前结构试编译（加 LIMIT 0，不取数），通过或结构恢复后自动恢复 |
 | 成本失控 | 单次提问的 token 与金额预算熔断，修复轮次上限 |
 | 公网演示被刷额度 | 访问口令、每访客限流、全站并发上限与每日花费上限；浏览器断开即停止调用模型，失败和中途取消的花费同样计入上限；访客的记忆按浏览器隔离（见 [部署指南](docs/DEPLOY.md)） |
 
@@ -248,6 +260,7 @@ deepquery ask "问题" --db postgres://readonly:pwd@host:5432/yourdb    # uv syn
 
 - [docs/DEPLOY.md](docs/DEPLOY.md)：服务器部署、nginx 反代、访问口令、切换真实数据
 - [docs/SERVER-RUNBOOK.md](docs/SERVER-RUNBOOK.md)：从全新服务器到上线的逐步执行清单
+- [docs/catalog.md](docs/catalog.md)：数据库建档与记忆同步的设计
 - [docs/benchmarks.md](docs/benchmarks.md)：BIRD / Spider 接入与统计口径
 - [docs/badcases.md](docs/badcases.md)：失败案例逐条复盘
 - [docs/frontend-spec.md](docs/frontend-spec.md)：SSE 事件与 API 约定
