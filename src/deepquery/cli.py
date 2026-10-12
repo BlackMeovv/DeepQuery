@@ -3,6 +3,7 @@
     deepquery ask "上海的客户一共有多少个？" [--trace] [--no-answer]
     deepquery schema        # 查看喂给模型的 schema 上下文
     deepquery demo-db       # 生成演示库
+    deepquery catalog build / status / show / describe / review / confirm   # 数据库建档与记忆同步
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ def _override_db(args: argparse.Namespace):
 def _cmd_ask(args: argparse.Namespace) -> int:
     from . import build_agent
 
-    agent = build_agent(_override_db(args))
+    agent = build_agent(_override_db(args), wait_catalog=True)
     outcome = agent.ask(
         args.question,
         generate_answer=not args.no_answer,
@@ -85,7 +86,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 def _cmd_analyze(args: argparse.Namespace) -> int:
     from . import build_agent
 
-    agent = build_agent(_override_db(args))
+    agent = build_agent(_override_db(args), wait_catalog=True)
     outcome = agent.analyst.analyze(args.question, user_id=args.user)
     if outcome.plan_thought:
         console.print(f"[dim]思路：{escape(outcome.plan_thought)}[/dim]")
@@ -203,8 +204,167 @@ def _cmd_memories(args: argparse.Namespace) -> int:
     if not rows:
         console.print("（暂无记忆）")
         return 0
+    flagged = _flagged_memories()
     for note_id, note, created_at in rows:
-        console.print(f"#{note_id} [{created_at}] {escape(note)}")
+        line = f"#{note_id} [{created_at}] {escape(note)}"
+        if str(note_id) in flagged:
+            line += f"  [yellow]（待复核，暂不使用：{escape(flagged[str(note_id)])}）[/yellow]"
+        console.print(line)
+    return 0
+
+
+def _flagged_memories() -> dict[str, str]:
+    """当前库的档案里待复核的记忆 {id: 原因}；没开建档或档案库打不开时为空。"""
+    from .config import get_settings
+
+    settings = get_settings()
+    if not settings.catalog_enabled:
+        return {}
+    try:
+        from .catalog import CatalogStore, db_identity
+        from .tools.engines import open_database
+
+        store = CatalogStore(settings.catalog_db_path)
+        key = db_identity(open_database(settings.db_path))
+        return {i.key: i.reason for i in store.items(key, "memory") if i.status == "review"}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+# ---------- 数据库建档 ----------
+
+
+def _open_catalog(args: argparse.Namespace, describe: bool = False):
+    """打开当前库的档案，并把例句、口径、用户记忆接上（复核要用）。describe=True 时接上模型补说明。"""
+    from .agent.graph import resolve_allowed_tables
+    from .catalog import Catalog
+    from .datasets import knowledge_paths
+    from .memory import MemoryStore
+    from .retrieval import load_examples, load_glossary
+    from .tools.engines import open_database
+
+    settings = _override_db(args)
+    db = open_database(settings.db_path, timeout_seconds=settings.sql_timeout_seconds, max_rows=settings.sql_max_rows)
+    llm = None
+    if describe and settings.catalog_describe and settings.llm_api_key and not settings.llm_mock:
+        from .llm import LLMClient
+
+        llm = LLMClient(settings)
+    catalog = Catalog.from_settings(settings, db, llm=llm)
+    glossary_path, examples_path = knowledge_paths(settings)
+    catalog.attach(
+        memory=MemoryStore(settings.memory_db_path),
+        allowed=lambda: resolve_allowed_tables(settings, db),
+        glossary=load_glossary(glossary_path),
+        examples=load_examples(examples_path),
+    )
+    return catalog
+
+
+def _fmt_time(ts) -> str:
+    import time
+
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "—"
+
+
+def _cmd_catalog_build(args: argparse.Namespace) -> int:
+    catalog = _open_catalog(args, describe=not args.no_describe)
+    if catalog.llm is None and not args.no_describe:
+        console.print("[dim]没有配置 LLM_API_KEY（或关了 CATALOG_DESCRIBE）：只建档，不补中文说明[/dim]")
+    report = catalog.sync(force=args.force, wait_lock=120)  # 服务正在同步时等它做完
+    for line in report.lines():
+        console.print(f"· {escape(line)}")
+    st = catalog.status()
+    console.print(f"[dim]{st['profiled']}/{st['tables']} 张表已建档 · 用时 {report.seconds}s · 档案库 {escape(str(catalog.store.path))}[/dim]")
+    return 0
+
+
+def _cmd_catalog_status(args: argparse.Namespace) -> int:
+    catalog = _open_catalog(args)
+    st = catalog.status()
+    console.print(f"[bold]建档[/bold]：{st['profiled']}/{st['tables']} 张表，最近一次 {_fmt_time(st['last_profiled_at'])}")
+    d = st["descriptions"]
+    console.print(f"[bold]说明[/bold]：建表注释 {d['ddl']} 条 · 模型补写（待确认）{d['llm']} 条 · 人工 {d['human']} 条")
+    names = {"glossary": "口径", "example": "例句", "memory": "用户记忆"}
+    parts = [f"{names[k]} {v['active']} 条有效" + (f"、[yellow]{v['review']} 条待复核[/yellow]" if v["review"] else "") for k, v in st["items"].items()]
+    console.print("[bold]依赖索引[/bold]：" + " · ".join(parts))
+    if st["last_error"]:
+        console.print(f"[yellow]最近的错误[/yellow]：{escape(st['last_error'])}")
+    events = catalog.store.events(catalog.key, limit=args.events)
+    if events:
+        console.print("[bold]最近的变化[/bold]：")
+        for at, _kind, detail in events:
+            console.print(f"  [{_fmt_time(at)}] {escape(detail)}")
+    return 0
+
+
+def _cmd_catalog_show(args: argparse.Namespace) -> int:
+    catalog = _open_catalog(args)
+    view = catalog.view()
+    if not view.tables:
+        console.print("还没有建档：先运行 deepquery catalog build")
+        return 1
+    if not args.table:
+        for name, card in view.tables.items():
+            state = "已建档" if card.profile is not None else "建档中"
+            note = view.table_note(name)
+            console.print(f"[bold]{escape(name)}[/bold]（{len(card.structure.columns)} 列，{state}）{escape(note)}")
+        return 0
+    real = next((t for t in view.tables if t.lower() == args.table.lower()), None)
+    if real is None:
+        console.print(f"[yellow]没有这张表：{escape(args.table)}[/yellow]")
+        return 1
+    card = view.tables[real]
+    cols = "、".join(f"{c} {t}".strip() for c, t in card.structure.columns)
+    console.print(f"[bold]{escape(real)}[/bold] 列：{escape(cols)}")
+    block = view.render(real)
+    console.print(Text(block or "（这张表还没建完档，或没有需要特别说明的特征）"))
+    return 0
+
+
+def _cmd_catalog_describe(args: argparse.Namespace) -> int:
+    catalog = _open_catalog(args)
+    table, _, column = args.target.partition(".")
+    view = catalog.view()
+    real = next((t for t in view.tables if t.lower() == table.lower()), None)
+    if real is None:
+        console.print(f"[yellow]没有这张表：{escape(table)}（先运行 deepquery catalog build）[/yellow]")
+        return 1
+    if column:
+        real_col = view.tables[real].structure.real_column(column)
+        if real_col is None:
+            console.print(f"[yellow]{escape(real)} 没有列 {escape(column)}[/yellow]")
+            return 1
+        column = real_col
+    catalog.set_description(real, column, args.text)
+    target = f"{real}.{column}" if column else real
+    console.print(f"已{'清除' if not args.text.strip() else '更新'} {escape(target)} 的说明（人工说明优先，之后的建档不会覆盖）")
+    return 0
+
+
+def _cmd_catalog_review(args: argparse.Namespace) -> int:
+    catalog = _open_catalog(args)
+    items = catalog.review_items()
+    if not items:
+        console.print("没有待复核的条目")
+        return 0
+    names = {"glossary": "口径", "example": "例句", "memory": "用户记忆"}
+    for item in items:
+        who = f"（用户 {item.user_id}）" if item.user_id else ""
+        text = item.text if len(item.text) <= 60 else item.text[:59] + "…"
+        console.print(f"#{item.id} [{names.get(item.kind, item.kind)}]{escape(who)} {escape(text)}")
+        console.print(f"    [yellow]{escape(item.reason)}[/yellow]")
+    console.print("[dim]改好源文件（例句 / 口径 jsonl）或记忆后会自动重新登记；确认仍然有效：deepquery catalog confirm <编号>[/dim]")
+    return 0
+
+
+def _cmd_catalog_confirm(args: argparse.Namespace) -> int:
+    catalog = _open_catalog(args)
+    item = catalog.confirm(args.item_id)
+    if item is None:
+        console.print("[yellow]没有这个编号[/yellow]")
+        return 1
+    console.print(f"已确认 #{item.id} 仍然有效，恢复召回")
     return 0
 
 
@@ -348,6 +508,30 @@ def main() -> None:
     forget.add_argument("note_id", type=int)
     forget.add_argument("--user", default="default")
     forget.set_defaults(func=_cmd_forget)
+
+    cat = sub.add_parser("catalog", help="数据库建档与记忆同步：build / status / show / describe / review / confirm")
+    csub = cat.add_subparsers(dest="catalog_command", required=True)
+    c_build = csub.add_parser("build", help="建档 / 同步：只重建结构变了的表，复核受影响的例句、口径和记忆")
+    c_build.add_argument("--force", action="store_true", help="所有表重新建档")
+    c_build.add_argument("--no-describe", action="store_true", help="不调用模型补写中文说明")
+    c_build.set_defaults(func=_cmd_catalog_build)
+    c_status = csub.add_parser("status", help="建档进度、说明来源、待复核条目数、最近的变化")
+    c_status.add_argument("--events", type=int, default=10)
+    c_status.set_defaults(func=_cmd_catalog_status)
+    c_show = csub.add_parser("show", help="看档案：不带表名列出全部表，带表名看这张表的档案")
+    c_show.add_argument("table", nargs="?")
+    c_show.set_defaults(func=_cmd_catalog_show)
+    c_desc = csub.add_parser("describe", help='人工写说明：describe orders.status "订单状态，paid 表示已支付"（空字符串表示清除）')
+    c_desc.add_argument("target", help="表 或 表.列")
+    c_desc.add_argument("text")
+    c_desc.set_defaults(func=_cmd_catalog_describe)
+    c_review = csub.add_parser("review", help="列出待复核的例句、口径和用户记忆")
+    c_review.set_defaults(func=_cmd_catalog_review)
+    c_confirm = csub.add_parser("confirm", help="确认一条待复核的条目仍然有效：confirm <编号>")
+    c_confirm.add_argument("item_id", type=int)
+    c_confirm.set_defaults(func=_cmd_catalog_confirm)
+    for p in (c_build, c_status, c_show, c_desc, c_review, c_confirm):
+        p.add_argument("--db", default=None, help="SQLite 文件路径，或 mysql:// / postgres:// 连接串（默认 DB_PATH）")
 
     runs = sub.add_parser("runs", help="运行概况：提问次数、延迟、花费、好评差评，列出最近的差评")
     runs.add_argument("--days", type=int, default=7)

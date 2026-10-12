@@ -216,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--analysis", action="store_true", help="跑分析模式评测")
     parser.add_argument("--gold-check", action="store_true", help="只检查标准 SQL 能跑通（不调用模型）")
+    parser.add_argument("--catalog", action="store_true", help="开启数据库建档（默认关闭，与历史评测可比）")
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -233,7 +234,12 @@ def main(argv: list[str] | None = None) -> int:
 
     from .. import build_agent
 
-    agent = build_agent(settings)
+    # 建档默认关：开启会改变提示词，和历史评测不可比；开启时等建档完成再答题，结果才可复现
+    settings = settings.model_copy(update={"catalog_enabled": bool(args.catalog)})
+    agent = build_agent(settings, wait_catalog=True)
+    if agent.catalog is not None:
+        agent.catalog.observe_enabled = False  # 答题过程中不改档案，每题看到同一份
+        agent.catalog.refresh_seconds = 0
     kind = "analysis" if args.analysis else "behavior"
     report = run_analysis(agent, cases) if args.analysis else run_behavior(agent, cases, settings.db_path, args.repeats)
     report["summary"].update({"label": args.label, "kind": kind, "model": settings.llm_model, "db": settings.db_path})

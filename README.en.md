@@ -66,9 +66,9 @@ A 236-question in-house set plus BIRD; clustered confidence intervals, and every
 </td>
 <td width="33%" valign="top">
 
-**🧭 Context engineering**
+**🗂️ Knows the database first**
 
-The full schema is used when it fits; above a size threshold it is disclosed progressively: a table catalog first (about 11–15% of the full definitions), then full definitions of the tables the model picks, and real column values on demand. Glossary, examples and user memory are injected on demand
+On connect, every table is profiled read-only: enum values, date ranges, format samples and join keys, plus Chinese descriptions for uncommented columns (marked unconfirmed; human edits win). Schema changes are synced per table by fingerprint, and examples, glossary entries and user memories that reference a dropped table, column or value are put on hold until they check out again. Schemas too large for the prompt are disclosed progressively
 
 </td>
 <td width="33%" valign="top">
@@ -160,7 +160,7 @@ make demo-db                  # fictional e-commerce data: 240 customers, 36 pro
 make olist-db                 # optional: real Olist Brazilian e-commerce data (~100k orders); point DB_PATH at it
 make ask Q="Which 5 customers placed the most orders?"
 make serve                    # web UI at http://localhost:8000
-make test                     # 280+ offline tests, no API key needed
+make test                     # 500+ offline tests, no API key needed
 ```
 
 Point `--db` at any SQLite file or a `mysql://` / `postgres://` DSN; use a read-only database

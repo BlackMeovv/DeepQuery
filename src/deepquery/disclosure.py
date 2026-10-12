@@ -37,11 +37,13 @@ def table_note(doc: str) -> str:
     return m.group(1).strip()[:80] if m else ""
 
 
-def build_catalog(docs: dict[str, str], columns: dict[str, list[str]]) -> dict[str, str]:
-    """每张表一行目录：`表名：说明` + 列名清单。"""
+def build_catalog(
+    docs: dict[str, str], columns: dict[str, list[str]], notes: dict[str, str] | None = None
+) -> dict[str, str]:
+    """每张表一行目录：`表名：说明` + 列名清单。notes：档案里的表说明（人工 / 模型补写），优先于建表注释。"""
     out = {}
     for table, doc in docs.items():
-        note = table_note(doc)
+        note = (notes or {}).get(table) or table_note(doc)
         head = f"{table}：{note}" if note else table
         cols = columns.get(table) or []
         out[table] = f"{head}\n  列：{', '.join(cols)}" if cols else head
@@ -96,10 +98,11 @@ def _real_column(columns: dict[str, list[str]], table: str, name: str) -> str | 
     return next((c for c in columns.get(table, []) if c.lower() == name.lower()), None)
 
 
-def probe_values(db, table: str, column: str, limit: int = VALUES_PER_COLUMN) -> str | None:
+def probe_values(db, table: str, column: str, limit: int = VALUES_PER_COLUMN, on_values=None) -> str | None:
     """查一列最常见的取值及出现次数，给模型核对过滤条件的写法。
 
     表名列名必须已经核对过真实存在；SQL 仍然走一遍守卫，再用只读连接执行（有超时）。
+    on_values(table, column, rows, limit)：查到取值后回调（档案据此补上新出现的取值）。
     """
     dialect = getattr(db, "dialect", "sqlite")
     qt = exp.to_identifier(table, quoted=True).sql(dialect=dialect)
@@ -114,6 +117,11 @@ def probe_values(db, table: str, column: str, limit: int = VALUES_PER_COLUMN) ->
     result = db.run_query(verdict.sql)
     if not result.ok:
         return f"{table}.{column}：没有非空取值" if result.error_kind == "empty_result" else None
+    if on_values is not None:
+        try:
+            on_values(table, column, list(result.rows), limit)
+        except Exception:  # noqa: BLE001 —— 补档案失败不影响这次查询
+            pass
     items = []
     for value, count in result.rows:
         text = str(value)
@@ -134,6 +142,7 @@ class TextFilter:
     column: str
     values: list[str]
     exact: bool  # 裸列上的 = / IN：字面量必须原样出现在列里才可能命中
+    negated: bool = False  # 外面套着 NOT（x NOT IN (…) / NOT (x = …)）：建档的取值依赖不算它
 
 
 def _column_of(node) -> tuple[exp.Column | None, bool]:
@@ -192,8 +201,15 @@ def text_filters(sql: str, columns: dict[str, list[str]], dialect: str = "sqlite
         pair = resolve(col) if col is not None else None
         if pair:
             exact = not wrapped and isinstance(node, (exp.EQ, exp.In))
-            out.append(TextFilter(pair[0], pair[1], [lit.this for lit in literals], exact))
+            out.append(TextFilter(pair[0], pair[1], [lit.this for lit in literals], exact, _negated(node)))
     return out
+
+
+def _negated(node) -> bool:
+    parent = node.parent
+    while isinstance(parent, exp.Paren):
+        parent = parent.parent
+    return isinstance(parent, exp.Not)
 
 
 def filtered_columns(sql: str, columns: dict[str, list[str]], dialect: str = "sqlite", limit: int = 3) -> list[tuple[str, str]]:
